@@ -28,10 +28,12 @@ import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProviderChain;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.services.sts.auth.StsAssumeRoleCredentialsProvider;
+import software.amazon.awssdk.utils.SdkAutoCloseable;
 
 import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -146,6 +148,28 @@ class S3ClientProviderTest {
 
         assertThat(provider.getCredentialsProvider())
                 .isInstanceOf(StsAssumeRoleCredentialsProvider.class);
+    }
+
+    @Test
+    void testCloseClosesBaseCredentialsProviderWhenAssumeRoleWrapsIt() {
+        CloseTrackingCredentialsProvider.reset();
+        S3ClientProvider provider =
+                S3ClientProvider.builder()
+                        .endpoint(DUMMY_ENDPOINT)
+                        .region(DUMMY_REGION)
+                        .credentialsProviderClasses(
+                                CloseTrackingCredentialsProvider.class.getName())
+                        .assumeRoleArn("arn:aws:iam::123456789012:role/TestRole")
+                        .build();
+
+        assertThat(provider.getCredentialsProvider())
+                .isInstanceOf(StsAssumeRoleCredentialsProvider.class);
+        assertThat(provider.getBaseCredentialsProvider())
+                .isInstanceOf(AwsCredentialsProviderChain.class);
+
+        provider.closeAsync().join();
+
+        assertThat(CloseTrackingCredentialsProvider.isClosed()).isTrue();
     }
 
     @Test
@@ -271,6 +295,66 @@ class S3ClientProviderTest {
                 .hasMessageContaining("retryThrottleBaseDelay");
     }
 
+    @Test
+    void testCrtDisabledByDefault() {
+        S3ClientProvider provider =
+                S3ClientProvider.builder().endpoint(DUMMY_ENDPOINT).region(DUMMY_REGION).build();
+        assertThat(provider.isUseCrt()).isFalse();
+        // When CRT is disabled the async client must NOT be a CRT-backed implementation.
+        assertThat(provider.getAsyncClient().getClass().getName()).doesNotContain("Crt");
+        // No Flink-level default applied; getter returns null when user did not set the value.
+        assertThat(provider.getCrtTargetThroughputGbps()).isNull();
+        assertThat(provider.getCrtReadBufferSizeInBytes()).isNull();
+        assertThat(provider.getCrtMaxNativeMemoryLimitInBytes()).isNull();
+        // CRT max concurrency keeps its builder default (independent of s3.connection.max).
+        assertThat(provider.getCrtMaxConcurrency())
+                .isEqualTo(NativeS3FileSystemFactory.CRT_MAX_CONCURRENCY.defaultValue());
+    }
+
+    @Test
+    void testCrtFlagIsRecordedAndCrtBranchIsTaken() {
+        S3ClientProvider provider =
+                S3ClientProvider.builder()
+                        .endpoint(DUMMY_ENDPOINT)
+                        .region(DUMMY_REGION)
+                        .useCrt(true)
+                        .crtTargetThroughputGbps(20.0)
+                        .build();
+
+        assertThat(provider.isUseCrt()).isTrue();
+        assertThat(provider.getCrtTargetThroughputGbps()).isEqualTo(20.0);
+        assertThat(provider.getAsyncClient().getClass().getName()).contains("Crt");
+    }
+
+    @Test
+    void testCrtEnabledWithoutThroughputOverrideStillBuildsCrtClient() {
+        S3ClientProvider provider =
+                S3ClientProvider.builder()
+                        .endpoint(DUMMY_ENDPOINT)
+                        .region(DUMMY_REGION)
+                        .useCrt(true)
+                        .build();
+
+        assertThat(provider.isUseCrt()).isTrue();
+        assertThat(provider.getCrtTargetThroughputGbps()).isNull();
+        assertThat(provider.getAsyncClient().getClass().getName()).contains("Crt");
+    }
+
+    @Test
+    void testCrtMissingJarsMessageIsActionable() {
+        // Contract test: if CRT classes are missing at runtime the user must get a message
+        // that names the responsible config key, the missing JAR coordinates, and a setup
+        // pointer. A full classloader-isolation test would require multi-classloader infra
+        // disproportionate to the value; assert the message contract instead.
+        String msg = S3ClientProvider.Builder.crtMissingJarsMessage();
+        assertThat(msg).contains("s3.crt.enabled=true");
+        // aws-crt-client is now bundled in the fat JAR; only aws-crt (JNI) is external
+        assertThat(msg).doesNotContain("aws-crt-client");
+        assertThat(msg).contains("aws-crt");
+        assertThat(msg).contains("plugin");
+        assertThat(msg).contains("README");
+    }
+
     @SuppressWarnings("unchecked")
     private static List<AwsCredentialsProvider> extractChain(AwsCredentialsProvider provider)
             throws Exception {
@@ -278,5 +362,28 @@ class S3ClientProviderTest {
         Field field = AwsCredentialsProviderChain.class.getDeclaredField("credentialsProviders");
         field.setAccessible(true);
         return (List<AwsCredentialsProvider>) field.get(provider);
+    }
+
+    public static final class CloseTrackingCredentialsProvider
+            implements AwsCredentialsProvider, SdkAutoCloseable {
+        private static final AtomicBoolean CLOSED = new AtomicBoolean();
+
+        @Override
+        public AwsCredentials resolveCredentials() {
+            return AwsBasicCredentials.create("tracking-key", "tracking-secret");
+        }
+
+        @Override
+        public void close() {
+            CLOSED.set(true);
+        }
+
+        private static void reset() {
+            CLOSED.set(false);
+        }
+
+        private static boolean isClosed() {
+            return CLOSED.get();
+        }
     }
 }

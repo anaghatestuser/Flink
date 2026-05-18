@@ -25,8 +25,8 @@ import org.apache.flink.fs.s3native.S3ExceptionUtils;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
-import software.amazon.awssdk.core.sync.ResponseTransformer;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
@@ -53,8 +53,12 @@ import software.amazon.awssdk.transfer.s3.model.UploadFileRequest;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
 import java.util.stream.Collectors;
 
 /**
@@ -96,6 +100,8 @@ import java.util.stream.Collectors;
 public class NativeS3ObjectOperations {
 
     private static final Logger LOG = LoggerFactory.getLogger(NativeS3ObjectOperations.class);
+
+    private static final int DOWNLOAD_BUFFER_SIZE = 256 * 1024;
 
     private final S3Client s3Client;
     private final S3TransferManager transferManager;
@@ -259,8 +265,20 @@ public class NativeS3ObjectOperations {
                             .build();
 
             FileUpload fileUpload = transferManager.uploadFile(uploadRequest);
-            CompletedFileUpload completedUpload = fileUpload.completionFuture().join();
+            CompletedFileUpload completedUpload;
+            try {
+                completedUpload = fileUpload.completionFuture().get();
+            } catch (InterruptedException e) {
+                fileUpload.completionFuture().cancel(true);
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while uploading object for key: " + key, e);
+            } catch (ExecutionException e) {
+                throw new IOException(
+                        "Failed to async upload object for key: " + key, e.getCause());
+            }
             return new PutObjectResult(completedUpload.response().eTag());
+        } catch (IOException e) {
+            throw e;
         } catch (Exception e) {
             throw new IOException("Failed to async upload object for key: " + key, e);
         }
@@ -380,15 +398,91 @@ public class NativeS3ObjectOperations {
     }
 
     public long getObject(String key, File targetLocation) throws IOException {
+        java.nio.file.Path target = targetLocation.toPath().toAbsolutePath();
+        java.nio.file.Path parent = target.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        java.nio.file.Path tempTarget = createTemporaryDownloadFile(parent, target);
+        ResponseInputStream<GetObjectResponse> responseStream = null;
+        boolean success = false;
         try {
             GetObjectRequest request =
                     GetObjectRequest.builder().bucket(bucketName).key(key).build();
-            ResponseTransformer<GetObjectResponse, GetObjectResponse> responseTransformer =
-                    ResponseTransformer.toFile(targetLocation.toPath());
-            s3Client.getObject(request, responseTransformer);
-            return Files.size(targetLocation.toPath());
+            responseStream = s3Client.getObject(request);
+            copyStream(responseStream, tempTarget);
+            moveFile(tempTarget, target);
+            success = true;
+            return Files.size(target);
         } catch (S3Exception e) {
             throw new IOException("Failed to get object for key: " + key, e);
+        } finally {
+            if (responseStream != null) {
+                if (!success) {
+                    try {
+                        responseStream.abort();
+                    } catch (RuntimeException e) {
+                        LOG.debug("Error aborting S3 response stream for key {}", key, e);
+                    }
+                    try {
+                        responseStream.close();
+                    } catch (IOException e) {
+                        LOG.debug("Error closing S3 response stream for key {}", key, e);
+                    }
+                } else {
+                    try {
+                        responseStream.close();
+                    } catch (IOException e) {
+                        LOG.debug("Error closing S3 response stream for key {}", key, e);
+                    }
+                }
+            }
+            if (!success) {
+                deleteQuietly(tempTarget);
+            }
+        }
+    }
+
+    private static void copyStream(
+            ResponseInputStream<GetObjectResponse> in, java.nio.file.Path destination)
+            throws IOException {
+        try (OutputStream out = Files.newOutputStream(destination)) {
+            byte[] buffer = new byte[DOWNLOAD_BUFFER_SIZE];
+            int numBytes;
+            while ((numBytes = in.read(buffer)) != -1) {
+                out.write(buffer, 0, numBytes);
+            }
+        }
+    }
+
+    private static void moveFile(java.nio.file.Path source, java.nio.file.Path destination)
+            throws IOException {
+        try {
+            Files.move(
+                    source,
+                    destination,
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException ignored) {
+            Files.move(source, destination, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private static java.nio.file.Path createTemporaryDownloadFile(
+            java.nio.file.Path parent, java.nio.file.Path target) throws IOException {
+        String prefix =
+                target.getFileName() == null ? "s3-download" : target.getFileName().toString();
+        if (prefix.length() < 3) {
+            prefix = "s3-" + prefix;
+        }
+        return Files.createTempFile(parent, prefix, ".tmp");
+    }
+
+    private static void deleteQuietly(java.nio.file.Path path) {
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException e) {
+            LOG.debug("Could not delete temporary S3 download file {}", path, e);
         }
     }
 

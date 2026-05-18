@@ -128,9 +128,7 @@ class NativeS3RecoverableFsDataOutputStream extends RecoverableFsDataOutputStrea
 
     private void createNewTempFile() throws IOException {
         File tmpDir = new File(localTmpDir);
-        if (!tmpDir.exists()) {
-            tmpDir.mkdirs();
-        }
+        Files.createDirectories(tmpDir.toPath());
 
         currentTempFile = new File(tmpDir, "s3-part-" + UUID.randomUUID());
         currentFileStream = new FileOutputStream(currentTempFile);
@@ -198,11 +196,18 @@ class NativeS3RecoverableFsDataOutputStream extends RecoverableFsDataOutputStrea
     private void uploadCurrentPart() throws IOException {
         currentOutputStream.close();
 
-        int partNumber = nextPartNumber++;
-        NativeS3ObjectOperations.UploadPartResult result =
-                s3AccessHelper.uploadPart(
-                        key, uploadId, partNumber, currentTempFile, currentPartSize);
+        int partNumber = nextPartNumber;
+        NativeS3ObjectOperations.UploadPartResult result;
+        try {
+            result =
+                    s3AccessHelper.uploadPart(
+                            key, uploadId, partNumber, currentTempFile, currentPartSize);
+        } catch (IOException e) {
+            Files.delete(currentTempFile.toPath());
+            throw e;
+        }
 
+        nextPartNumber++;
         completedParts.add(new PartETag(result.getPartNumber(), result.getETag()));
         numBytesInParts += currentPartSize;
 
@@ -217,7 +222,6 @@ class NativeS3RecoverableFsDataOutputStream extends RecoverableFsDataOutputStrea
                 throw new IOException("Stream is already closed");
             }
 
-            closed = true;
             currentOutputStream.close();
 
             if (currentPartSize > 0) {
@@ -230,6 +234,7 @@ class NativeS3RecoverableFsDataOutputStream extends RecoverableFsDataOutputStrea
                     new NativeS3Recoverable(
                             key, uploadId, new ArrayList<>(completedParts), numBytesInParts);
 
+            closed = true;
             return new NativeS3Committer(s3AccessHelper, recoverable);
         } finally {
             unlock();
@@ -270,11 +275,20 @@ class NativeS3RecoverableFsDataOutputStream extends RecoverableFsDataOutputStrea
         try {
             if (!closed) {
                 closed = true;
+                IOException cleanupException = null;
                 if (currentOutputStream != null) {
-                    currentOutputStream.close();
+                    try {
+                        currentOutputStream.close();
+                    } catch (IOException e) {
+                        cleanupException = e;
+                    }
                 }
                 if (currentTempFile != null && currentTempFile.exists()) {
-                    Files.delete(currentTempFile.toPath());
+                    try {
+                        Files.delete(currentTempFile.toPath());
+                    } catch (IOException e) {
+                        cleanupException = e;
+                    }
                 }
 
                 try {
@@ -286,6 +300,9 @@ class NativeS3RecoverableFsDataOutputStream extends RecoverableFsDataOutputStrea
                             key,
                             uploadId,
                             e);
+                }
+                if (cleanupException != null) {
+                    throw cleanupException;
                 }
             }
         } finally {
