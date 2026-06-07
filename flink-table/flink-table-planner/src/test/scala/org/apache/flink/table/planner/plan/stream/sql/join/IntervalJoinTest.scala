@@ -489,8 +489,7 @@ class IntervalJoinTest extends TableTestBase {
         |  t1.rowtime BETWEEN t2.rowtime - INTERVAL '10' SECOND AND t2.rowtime + INTERVAL '1' HOUR
       """.stripMargin
 
-    assertThatThrownBy(() => util.verifyExecPlan(sqlQuery))
-      .hasStackTraceContaining("not yet supported")
+    util.verifyExecPlan(sqlQuery)
   }
 
   @Test
