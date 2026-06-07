@@ -493,6 +493,70 @@ class IntervalJoinTest extends TableTestBase {
       .hasStackTraceContaining("not yet supported")
   }
 
+  @Test
+  def testEarlyFireOuterJoinProducesUpdates(): Unit = {
+    val sqlQuery =
+      """
+        |SELECT /*+ EARLY_FIRE('delay'='5s') */ t1.a, t2.b
+        |FROM MyTable t1 LEFT OUTER JOIN MyTable2 t2 ON
+        |  t1.a = t2.a AND
+        |  t1.rowtime BETWEEN t2.rowtime - INTERVAL '10' SECOND AND t2.rowtime + INTERVAL '1' HOUR
+      """.stripMargin
+
+    util.verifyRelPlan(sqlQuery, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testEarlyFireOuterJoinIntoInsertOnlySinkFails(): Unit = {
+    util.tableEnv.executeSql(s"""
+                                |CREATE TABLE InsertOnlySink (
+                                |  a int,
+                                |  b string
+                                |) WITH (
+                                |  'connector' = 'values',
+                                |  'sink-insert-only' = 'true'
+                                |)
+       """.stripMargin)
+
+    val insert =
+      """
+        |INSERT INTO InsertOnlySink
+        |SELECT /*+ EARLY_FIRE('delay'='5s') */ t1.a, t2.b
+        |FROM MyTable t1 LEFT OUTER JOIN MyTable2 t2 ON
+        |  t1.a = t2.a AND
+        |  t1.rowtime BETWEEN t2.rowtime - INTERVAL '10' SECOND AND t2.rowtime + INTERVAL '1' HOUR
+      """.stripMargin
+
+    assertThatThrownBy(() => util.verifyRelPlanInsert(insert))
+      .hasMessageContaining("the EARLY_FIRE hint makes this outer interval join produce update")
+  }
+
+  @Test
+  def testEarlyFireNegativeWindowStaysInsertOnly(): Unit = {
+    val sqlQuery =
+      """
+        |SELECT /*+ EARLY_FIRE('delay'='5s') */ t1.a, t2.b
+        |FROM MyTable t1 LEFT OUTER JOIN MyTable2 t2 ON
+        |  t1.a = t2.a AND
+        |  t1.rowtime BETWEEN t2.rowtime + INTERVAL '10' SECOND AND t2.rowtime + INTERVAL '5' SECOND
+      """.stripMargin
+
+    util.verifyRelPlan(sqlQuery, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testEarlyFireInnerJoinStaysInsertOnly(): Unit = {
+    val sqlQuery =
+      """
+        |SELECT /*+ EARLY_FIRE('delay'='5s') */ t1.a, t2.b
+        |FROM MyTable t1 JOIN MyTable2 t2 ON
+        |  t1.a = t2.a AND
+        |  t1.rowtime BETWEEN t2.rowtime - INTERVAL '10' SECOND AND t2.rowtime + INTERVAL '1' HOUR
+      """.stripMargin
+
+    util.verifyRelPlan(sqlQuery, ExplainDetail.CHANGELOG_MODE)
+  }
+
   // Other tests
   @Test
   def testJoinTimeBoundary(): Unit = {
