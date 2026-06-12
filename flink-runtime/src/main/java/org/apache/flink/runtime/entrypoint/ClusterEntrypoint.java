@@ -377,6 +377,33 @@ public abstract class ClusterEntrypoint implements AutoCloseableAsync, FatalErro
             configuration.set(JobManagerOptions.ADDRESS, commonRpcService.getAddress());
             configuration.set(JobManagerOptions.PORT, commonRpcService.getPort());
 
+            metricRegistry = createMetricRegistry(configuration, pluginManager, rpcSystem);
+
+            final RpcService metricQueryServiceRpcService =
+                    MetricUtils.startRemoteMetricsRpcService(
+                            configuration,
+                            commonRpcService.getAddress(),
+                            configuration.get(JobManagerOptions.BIND_HOST),
+                            rpcSystem);
+            metricRegistry.startQueryService(metricQueryServiceRpcService, null);
+
+            final String hostname = RpcUtils.getHostname(commonRpcService);
+
+            processMetricGroup =
+                    MetricUtils.instantiateProcessMetricGroup(
+                            metricRegistry,
+                            hostname,
+                            ConfigurationUtils.getSystemResourceMetricsProbingInterval(
+                                    configuration));
+
+            // Second-phase init for file system plugins that opt into metrics (e.g.
+            // flink-s3-fs-native): hand them the process-level metric group before any file system
+            // is used. This must run ahead of the HA services and BlobServer below, because those
+            // may open external file systems (e.g. S3 HA/blob storage), creating them first would
+            // cache metric-less file system clients for the rest of the process lifetime. See
+            // FileSystem#attachMetrics and MetricsAware.
+            FileSystem.attachMetrics(processMetricGroup);
+
             ioExecutor =
                     Executors.newFixedThreadPool(
                             ClusterEntrypointUtils.getPoolSize(configuration),
@@ -400,24 +427,6 @@ public abstract class ClusterEntrypoint implements AutoCloseableAsync, FatalErro
             configuration.set(BlobServerOptions.PORT, String.valueOf(blobServer.getPort()));
             heartbeatServices = createHeartbeatServices(configuration);
             failureEnrichers = FailureEnricherUtils.getFailureEnrichers(configuration);
-            metricRegistry = createMetricRegistry(configuration, pluginManager, rpcSystem);
-
-            final RpcService metricQueryServiceRpcService =
-                    MetricUtils.startRemoteMetricsRpcService(
-                            configuration,
-                            commonRpcService.getAddress(),
-                            configuration.get(JobManagerOptions.BIND_HOST),
-                            rpcSystem);
-            metricRegistry.startQueryService(metricQueryServiceRpcService, null);
-
-            final String hostname = RpcUtils.getHostname(commonRpcService);
-
-            processMetricGroup =
-                    MetricUtils.instantiateProcessMetricGroup(
-                            metricRegistry,
-                            hostname,
-                            ConfigurationUtils.getSystemResourceMetricsProbingInterval(
-                                    configuration));
 
             archivedApplicationStore =
                     createArchivedApplicationStore(
