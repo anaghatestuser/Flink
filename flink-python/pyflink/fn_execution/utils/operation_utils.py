@@ -134,6 +134,9 @@ def extract_user_defined_function(user_defined_function_proto, pandas_udaf=False
                 else:
                     # the input argument is a column of the input row
                     args_str.append("value[%s]" % arg.inputOffset)
+            elif arg.HasField("refIndex"):
+                # Reference to a previously computed UDF result (CSE).
+                args_str.append("results[%s]" % arg.refIndex)
             else:
                 # the input argument is a constant value
                 constant_value_name, parsed_constant_value = \
