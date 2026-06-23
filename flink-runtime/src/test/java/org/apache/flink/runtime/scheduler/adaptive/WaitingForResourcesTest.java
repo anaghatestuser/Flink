@@ -287,8 +287,7 @@ class WaitingForResourcesTest {
 
     @Test
     void testGetJobIncludesCheckpointStatsFromPreviousExecutionGraph() {
-        ExecutionGraph previousExecutionGraph =
-                org.mockito.Mockito.mock(ExecutionGraph.class);
+        ExecutionGraph previousExecutionGraph = org.mockito.Mockito.mock(ExecutionGraph.class);
         CheckpointStatsSnapshot expectedSnapshot = CheckpointStatsSnapshot.empty();
         org.mockito.Mockito.when(previousExecutionGraph.getCheckpointStatsSnapshot())
                 .thenReturn(expectedSnapshot);
