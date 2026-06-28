@@ -314,8 +314,8 @@ class WaitingForResourcesTest {
                         context -> TestingStateTransitionManager.withNoOp());
 
         ArchivedExecutionGraph archivedGraph = wfr.getJob();
-        // The sparse archived graph from MockContext does not set checkpoint stats
         assertThat(archivedGraph).isNotNull();
+        assertThat(archivedGraph.getCheckpointStatsSnapshot()).isNull();
     }
 
     private static class MockContext extends MockStateWithoutExecutionGraphContext
