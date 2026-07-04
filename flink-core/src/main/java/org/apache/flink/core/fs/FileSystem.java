@@ -351,12 +351,12 @@ public abstract class FileSystem implements IFileSystem {
                 if (factory instanceof MetricsAware) {
                     try {
                         ((MetricsAware) factory).setMetricGroup(fsGroup);
-                    } catch (Throwable t) {
+                    } catch (Exception e) {
                         // A misbehaving plugin must never break process startup.
                         LOG.warn(
                                 "Failed to attach metrics to file system factory {}",
                                 factory.getClass().getName(),
-                                t);
+                                e);
                     }
                 }
             }

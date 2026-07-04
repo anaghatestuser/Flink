@@ -19,6 +19,7 @@
 package org.apache.flink.core.fs;
 
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.core.plugin.MetricsAware;
 import org.apache.flink.core.plugin.TestingPluginManager;
 import org.apache.flink.metrics.MetricGroup;
@@ -47,10 +48,9 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * init contract.
  *
  * <p>The headline case is {@link #attachMetricsReachesPluginLoadedMetricsAwareFactory()}: plugin
- * file systems are registered wrapped in a {@link PluginFileSystemFactory}, which does <em>not</em>
- * itself implement {@link MetricsAware}. {@code attachMetrics} must unwrap the proxy to reach the
- * real factory, otherwise the metric group is silently never delivered and no metrics are ever
- * emitted.
+ * file systems are registered behind wrappers such as {@link PluginFileSystemFactory}. {@code
+ * attachMetrics} must still reach the real factory, otherwise the metric group is silently never
+ * delivered and no metrics are ever emitted.
  */
 class FileSystemAttachMetricsTest {
 
@@ -74,6 +74,18 @@ class FileSystemAttachMetricsTest {
         // process group itself.
         assertThat(processGroup.childGroupNames).containsExactly("filesystem");
         assertThat(factory.receivedGroup.get()).isNotNull().isNotSameAs(processGroup);
+    }
+
+    @Test
+    void attachMetricsReachesMetricsAwareFactoryBehindConnectionLimiter() {
+        RecordingMetricsAwareFactory factory = new RecordingMetricsAwareFactory("limited-test-fs");
+        Configuration config = new Configuration();
+        config.set(CoreOptions.fileSystemConnectionLimit(factory.getScheme()), 1);
+        initializeWithPlugins(config, factory);
+
+        FileSystem.attachMetrics(new UnregisteredMetricsGroup());
+
+        assertThat(factory.setMetricGroupCalls).hasValue(1);
     }
 
     @Test
@@ -134,9 +146,14 @@ class FileSystemAttachMetricsTest {
     }
 
     private static void initializeWithPlugins(FileSystemFactory... factories) {
+        initializeWithPlugins(new Configuration(), factories);
+    }
+
+    private static void initializeWithPlugins(
+            Configuration config, FileSystemFactory... factories) {
         Map<Class<?>, Iterator<?>> plugins = new HashMap<>();
         plugins.put(FileSystemFactory.class, Arrays.asList(factories).iterator());
-        FileSystem.initialize(new Configuration(), new TestingPluginManager(plugins));
+        FileSystem.initialize(config, new TestingPluginManager(plugins));
     }
 
     // ------------------------------------------------------------------------

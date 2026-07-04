@@ -35,6 +35,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for {@link AwsSdkMetricBridge}'s translation of SDK metric records into Flink metrics. */
 class AwsSdkMetricBridgeTest {
@@ -115,17 +116,32 @@ class AwsSdkMetricBridgeTest {
     }
 
     @Test
-    void emptyAllowlistFallsBackToDefaults() {
+    void emptyAllowlistIsRejected() {
+        CapturingMetricGroup root = new CapturingMetricGroup();
+
+        assertThatThrownBy(
+                        () ->
+                                new AwsSdkMetricBridge(
+                                        root,
+                                        Collections.emptyList(),
+                                        S3MetricHistogram.DEFAULT_WINDOW_SIZE))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("allowlist must not be empty");
+    }
+
+    @Test
+    void iopsAllowlistRegistersApiCallCountForDerivedRate() {
         CapturingMetricGroup root = new CapturingMetricGroup();
         AwsSdkMetricBridge bridge =
                 new AwsSdkMetricBridge(
-                        root, Collections.emptyList(), S3MetricHistogram.DEFAULT_WINDOW_SIZE);
+                        root,
+                        Collections.singletonList(AwsSdkMetricBridge.IOPS),
+                        S3MetricHistogram.DEFAULT_WINDOW_SIZE);
 
         bridge.publish(apiCall("PutObject", Duration.ofMillis(120), true, 0, 200));
 
-        // The five default metrics include api_call_count and api_call_duration_ms.
         assertThat(root.count("op=PutObject/status_class=2xx/api_call_count")).isEqualTo(1L);
-        assertThat(root.histograms.get("op=PutObject/api_call_duration_ms")).isNotNull();
+        assertThat(root.histograms).doesNotContainKey("op=PutObject/api_call_duration_ms");
     }
 
     @Test

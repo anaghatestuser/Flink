@@ -23,6 +23,7 @@ import org.apache.flink.metrics.HistogramStatistics;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for {@link S3MetricHistogram}. */
 class S3MetricHistogramTest {
@@ -69,5 +70,12 @@ class S3MetricHistogramTest {
         assertThat(stats.getMax()).isZero();
         assertThat(stats.getMean()).isZero();
         assertThat(stats.getQuantile(0.99)).isZero();
+    }
+
+    @Test
+    void rejectsNonPositiveWindowSize() {
+        assertThatThrownBy(() -> new S3MetricHistogram(0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("windowSize must be positive");
     }
 }

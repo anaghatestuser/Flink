@@ -124,19 +124,37 @@ public final class AwsSdkMetricBridge implements MetricPublisher {
                 histogramWindowSize > 0, "histogramWindowSize must be positive");
         this.histogramWindowSize = histogramWindowSize;
 
-        if (allowlist == null || allowlist.isEmpty()) {
-            LOG.warn(
-                    "S3 metrics allowlist is empty; falling back to the default metric set {}",
-                    DEFAULT_ALLOWLIST);
-            this.allowAll = false;
-            this.allowlist = new HashSet<>(DEFAULT_ALLOWLIST);
-        } else if (allowlist.contains(WILDCARD)) {
+        final Set<String> normalizedAllowlist = normalizeAllowlist(allowlist);
+        if (normalizedAllowlist.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "S3 metrics allowlist must not be empty. Disable metrics with "
+                            + "s3.metrics.enabled=false instead.");
+        } else if (normalizedAllowlist.contains(WILDCARD)) {
             this.allowAll = true;
             this.allowlist = new HashSet<>();
         } else {
+            if (normalizedAllowlist.contains(IOPS)) {
+                normalizedAllowlist.add(API_CALL_COUNT);
+            }
             this.allowAll = false;
-            this.allowlist = new HashSet<>(allowlist);
+            this.allowlist = normalizedAllowlist;
         }
+    }
+
+    private static Set<String> normalizeAllowlist(@Nullable Collection<String> configured) {
+        final Set<String> normalized = new HashSet<>();
+        if (configured == null) {
+            return normalized;
+        }
+        for (String metric : configured) {
+            if (metric != null) {
+                final String trimmed = metric.trim();
+                if (!trimmed.isEmpty()) {
+                    normalized.add(trimmed);
+                }
+            }
+        }
+        return normalized;
     }
 
     private boolean allowed(String metricName) {
@@ -147,9 +165,8 @@ public final class AwsSdkMetricBridge implements MetricPublisher {
     public void publish(MetricCollection apiCall) {
         try {
             translate(apiCall);
-        } catch (Throwable t) {
-            // Defence in depth: a metric failure must never affect S3 IO.
-            LOG.debug("Failed to publish S3 SDK metrics", t);
+        } catch (Exception e) {
+            LOG.warn("Failed to publish S3 SDK metrics", e);
         }
     }
 

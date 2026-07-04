@@ -350,10 +350,10 @@ public class NativeS3FileSystemFactory implements FileSystemFactory, MetricsAwar
                     .withDescription(
                             "Names of S3 metrics to register. Replaces (does not merge with) the "
                                     + "default list. Use \"*\" to register every metric the plugin "
-                                    + "emits. An empty list with s3.metrics.enabled=true is treated "
-                                    + "as misconfiguration: a warning is logged and the defaults are "
-                                    + "used. ('iops' is derived at reporter time from api_call_count "
-                                    + "and is not a separately registered metric.)");
+                                    + "emits. An empty list with s3.metrics.enabled=true is invalid; "
+                                    + "disable metrics with s3.metrics.enabled=false instead. ('iops' "
+                                    + "is derived at reporter time from api_call_count and is not a "
+                                    + "separately registered metric.)");
 
     public static final ConfigOption<Integer> METRICS_HISTOGRAM_WINDOW_SIZE =
             ConfigOptions.key("s3.metrics.histogram.window-size")
@@ -368,6 +368,9 @@ public class NativeS3FileSystemFactory implements FileSystemFactory, MetricsAwar
 
     /** Set via {@link #setMetricGroup(MetricGroup)}; null until {@code attachMetrics} fires. */
     @Nullable private volatile MetricGroup pluginMetrics;
+
+    /** The parent group received via {@link #setMetricGroup(MetricGroup)}. */
+    @Nullable private MetricGroup attachedMetricGroup;
 
     /** Lazily built once and shared across all clients created by this factory instance. */
     @Nullable private volatile AwsSdkMetricBridge metricBridge;
@@ -391,12 +394,16 @@ public class NativeS3FileSystemFactory implements FileSystemFactory, MetricsAwar
 
     @Override
     public synchronized void setMetricGroup(MetricGroup metricGroup) {
+        if (metricGroup == attachedMetricGroup) {
+            return;
+        }
         // filesystem_type label value is the scheme ("s3" / "s3a"). This is deliberate: s3:// and
         // s3a:// are served by separate factory instances, so keeping the scheme as the label value
         // lets their traffic be told apart, and sibling FS plugins register the same label key with
         // their own scheme. May be called more than once (see MetricsAware); reset the cached
         // bridge
         // so a re-attach with a different group re-scopes metrics created afterwards.
+        this.attachedMetricGroup = metricGroup;
         this.pluginMetrics = metricGroup.addGroup("filesystem_type", getScheme());
         this.metricBridge = null;
     }

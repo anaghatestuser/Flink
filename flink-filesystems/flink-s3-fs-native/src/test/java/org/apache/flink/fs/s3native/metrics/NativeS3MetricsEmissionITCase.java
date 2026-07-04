@@ -28,6 +28,7 @@ import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.Histogram;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.testutils.MetricListener;
+import org.apache.flink.util.AutoCloseableAsync;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -128,56 +129,61 @@ class NativeS3MetricsEmissionITCase {
         factory.setMetricGroup(fsGroup);
 
         FileSystem fs = factory.create(URI.create("s3://" + BUCKET + "/"));
-
-        // (1) A successful listing -> ListObjectsV2 (2xx). No request body, no checksum.
-        FileStatus[] listing = fs.listStatus(new Path("s3://" + BUCKET + "/"));
-        assertThat(listing).isNotNull();
-
-        // (2) A lookup of a key that does not exist -> HeadObject classified as an error (4xx).
         try {
-            fs.getFileStatus(new Path("s3://" + BUCKET + "/does-not-exist-" + System.nanoTime()));
-        } catch (FileNotFoundException expected) {
-            // expected: the object is absent
+            // (1) A successful listing -> ListObjectsV2 (2xx). No request body, no checksum.
+            FileStatus[] listing = fs.listStatus(new Path("s3://" + BUCKET + "/"));
+            assertThat(listing).isNotNull();
+
+            // (2) A lookup of a key that does not exist -> HeadObject classified as an error
+            // (4xx).
+            try {
+                fs.getFileStatus(
+                        new Path("s3://" + BUCKET + "/does-not-exist-" + System.nanoTime()));
+            } catch (FileNotFoundException expected) {
+                // expected: the object is absent
+            }
+
+            // The SDK publishes metrics after each completed call; the sync client typically
+            // publishes inline, but poll to remain robust against any asynchronous delivery.
+            CommonTestUtils.waitUtil(
+                    () -> listObjectsSuccessCount(metricListener) > 0L,
+                    Duration.ofSeconds(30),
+                    "Expected a ListObjectsV2 api_call_count metric to be emitted by real S3 traffic");
+
+            // --- api_call_count (Counter) for the successful listing ---
+            long listCalls = listObjectsSuccessCount(metricListener);
+            assertThat(listCalls).as("ListObjectsV2 (2xx) api_call_count").isGreaterThan(0L);
+
+            // --- api_call_duration_ms (Histogram) for the listing ---
+            Optional<Histogram> listDuration =
+                    metricListener.getHistogram(
+                            "filesystem",
+                            "filesystem_type",
+                            "s3",
+                            "op",
+                            "ListObjectsV2",
+                            "api_call_duration_ms");
+            assertThat(listDuration).as("ListObjectsV2 duration histogram").isPresent();
+            assertThat(listDuration.get().getCount()).isGreaterThan(0L);
+
+            // --- the failed lookup is recorded and classified as a client error (4xx) ---
+            long headErrorCalls =
+                    counter(
+                            metricListener,
+                            "filesystem",
+                            "filesystem_type",
+                            "s3",
+                            "op",
+                            "HeadObject",
+                            "status_class",
+                            "4xx",
+                            "api_call_count");
+            assertThat(headErrorCalls)
+                    .as("HeadObject (4xx) api_call_count for the missing key")
+                    .isGreaterThan(0L);
+        } finally {
+            ((AutoCloseableAsync) fs).closeAsync().get();
         }
-
-        // The SDK publishes metrics after each completed call; the sync client typically publishes
-        // inline, but poll to remain robust against any asynchronous delivery.
-        CommonTestUtils.waitUtil(
-                () -> listObjectsSuccessCount(metricListener) > 0L,
-                Duration.ofSeconds(30),
-                "Expected a ListObjectsV2 api_call_count metric to be emitted by real S3 traffic");
-
-        // --- api_call_count (Counter) for the successful listing ---
-        long listCalls = listObjectsSuccessCount(metricListener);
-        assertThat(listCalls).as("ListObjectsV2 (2xx) api_call_count").isGreaterThan(0L);
-
-        // --- api_call_duration_ms (Histogram) for the listing ---
-        Optional<Histogram> listDuration =
-                metricListener.getHistogram(
-                        "filesystem",
-                        "filesystem_type",
-                        "s3",
-                        "op",
-                        "ListObjectsV2",
-                        "api_call_duration_ms");
-        assertThat(listDuration).as("ListObjectsV2 duration histogram").isPresent();
-        assertThat(listDuration.get().getCount()).isGreaterThan(0L);
-
-        // --- the failed lookup is recorded and classified as a client error (4xx) ---
-        long headErrorCalls =
-                counter(
-                        metricListener,
-                        "filesystem",
-                        "filesystem_type",
-                        "s3",
-                        "op",
-                        "HeadObject",
-                        "status_class",
-                        "4xx",
-                        "api_call_count");
-        assertThat(headErrorCalls)
-                .as("HeadObject (4xx) api_call_count for the missing key")
-                .isGreaterThan(0L);
     }
 
     private static long listObjectsSuccessCount(MetricListener listener) {

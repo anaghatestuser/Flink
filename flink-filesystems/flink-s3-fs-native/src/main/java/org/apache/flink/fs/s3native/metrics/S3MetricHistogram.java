@@ -21,6 +21,7 @@ package org.apache.flink.fs.s3native.metrics;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.metrics.Histogram;
 import org.apache.flink.metrics.HistogramStatistics;
+import org.apache.flink.util.Preconditions;
 
 import java.util.Arrays;
 
@@ -51,6 +52,7 @@ public class S3MetricHistogram implements Histogram {
     }
 
     public S3MetricHistogram(int windowSize) {
+        Preconditions.checkArgument(windowSize > 0, "windowSize must be positive");
         this.window = new long[windowSize];
     }
 

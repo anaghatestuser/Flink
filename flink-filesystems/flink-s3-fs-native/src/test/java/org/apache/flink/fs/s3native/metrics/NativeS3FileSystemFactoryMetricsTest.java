@@ -50,11 +50,24 @@ class NativeS3FileSystemFactoryMetricsTest {
         assertThat(group.keyedGroups).containsEntry("filesystem_type", "s3a");
     }
 
+    @Test
+    void repeatedAttachmentWithSameGroupDoesNotCreateNewFilesystemTypeGroup() {
+        RecordingGroup group = new RecordingGroup();
+        NativeS3FileSystemFactory factory = new NativeS3FileSystemFactory();
+
+        factory.setMetricGroup(group);
+        factory.setMetricGroup(group);
+
+        assertThat(group.addGroupCalls).isEqualTo(1);
+    }
+
     private static final class RecordingGroup extends UnregisteredMetricsGroup {
         final Map<String, String> keyedGroups = new HashMap<>();
+        int addGroupCalls;
 
         @Override
         public MetricGroup addGroup(String key, String value) {
+            addGroupCalls++;
             keyedGroups.put(key, value);
             return this;
         }
