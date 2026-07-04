@@ -153,7 +153,9 @@ public class NativeS3FileSystemFactory implements FileSystemFactory {
                     .defaultValue(50)
                     .withDescription(
                             "Maximum number of HTTP connections in the S3 client connection pool. "
-                                    + "Applies to sync and async clients, including CRT when enabled. "
+                                    + "Applies to the sync (Apache) and async (Netty) clients. "
+                                    + "When s3.crt.enabled is true, the CRT clients use "
+                                    + "'s3.crt.max-concurrency' instead of this option. "
                                     + "Must be at least as large as 's3.bulk-copy.max-concurrent'.");
 
     public static final ConfigOption<Integer> BULK_COPY_MAX_CONCURRENT =
@@ -535,40 +537,45 @@ public class NativeS3FileSystemFactory implements FileSystemFactory {
                 MAX_CONNECTIONS.key(),
                 maxConnections);
 
-        // Optional: only validate when the user explicitly sets a value. If unset, the CRT runtime
-        // applies its own default (no Flink-level opinionated default).
+        final boolean crtEnabled = config.get(CRT_ENABLED);
+
+        // CRT-only options. Validated only when CRT is enabled (mirroring the bulk-copy gating
+        // below); when CRT is disabled these options are ignored. Unset optional values fall back
+        // to the CRT runtime's own defaults.
         final Double crtTargetThroughputGbps =
                 config.getOptional(CRT_TARGET_THROUGHPUT_GBPS).orElse(null);
-        if (crtTargetThroughputGbps != null) {
-            Preconditions.checkArgument(
-                    crtTargetThroughputGbps > 0,
-                    "'%s' must be positive, but was %s",
-                    CRT_TARGET_THROUGHPUT_GBPS.key(),
-                    crtTargetThroughputGbps);
-        }
         final MemorySize crtMaxNativeMemoryLimit =
                 config.getOptional(CRT_MAX_NATIVE_MEMORY_LIMIT).orElse(null);
-        if (crtMaxNativeMemoryLimit != null) {
-            Preconditions.checkArgument(
-                    crtMaxNativeMemoryLimit.getBytes() > 0,
-                    "'%s' must be positive, but was %s",
-                    CRT_MAX_NATIVE_MEMORY_LIMIT.key(),
-                    crtMaxNativeMemoryLimit);
-        }
         final MemorySize crtReadBufferSize = config.getOptional(CRT_READ_BUFFER_SIZE).orElse(null);
-        if (crtReadBufferSize != null) {
-            Preconditions.checkArgument(
-                    crtReadBufferSize.getBytes() > 0,
-                    "'%s' must be positive, but was %s",
-                    CRT_READ_BUFFER_SIZE.key(),
-                    crtReadBufferSize);
-        }
         final int crtMaxConcurrency = config.get(CRT_MAX_CONCURRENCY);
-        Preconditions.checkArgument(
-                crtMaxConcurrency > 0,
-                "'%s' must be a positive integer, but was %s",
-                CRT_MAX_CONCURRENCY.key(),
-                crtMaxConcurrency);
+        if (crtEnabled) {
+            if (crtTargetThroughputGbps != null) {
+                Preconditions.checkArgument(
+                        crtTargetThroughputGbps > 0,
+                        "'%s' must be positive, but was %s",
+                        CRT_TARGET_THROUGHPUT_GBPS.key(),
+                        crtTargetThroughputGbps);
+            }
+            if (crtMaxNativeMemoryLimit != null) {
+                Preconditions.checkArgument(
+                        crtMaxNativeMemoryLimit.getBytes() > 0,
+                        "'%s' must be positive, but was %s",
+                        CRT_MAX_NATIVE_MEMORY_LIMIT.key(),
+                        crtMaxNativeMemoryLimit);
+            }
+            if (crtReadBufferSize != null) {
+                Preconditions.checkArgument(
+                        crtReadBufferSize.getBytes() > 0,
+                        "'%s' must be positive, but was %s",
+                        CRT_READ_BUFFER_SIZE.key(),
+                        crtReadBufferSize);
+            }
+            Preconditions.checkArgument(
+                    crtMaxConcurrency > 0,
+                    "'%s' must be a positive integer, but was %s",
+                    CRT_MAX_CONCURRENCY.key(),
+                    crtMaxConcurrency);
+        }
 
         final boolean bulkCopyEnabled = config.get(BULK_COPY_ENABLED);
         final int bulkCopyMaxConcurrent = config.get(BULK_COPY_MAX_CONCURRENT);
@@ -610,7 +617,7 @@ public class NativeS3FileSystemFactory implements FileSystemFactory {
                         .retryMaxBackoff(config.get(RETRY_MAX_BACKOFF))
                         .credentialsProviderClasses(credentialsProviderClasses)
                         .encryptionConfig(encryptionConfig)
-                        .useCrt(config.get(CRT_ENABLED))
+                        .useCrt(crtEnabled)
                         .crtTargetThroughputGbps(crtTargetThroughputGbps)
                         .crtReadBufferSizeInBytes(
                                 crtReadBufferSize == null ? null : crtReadBufferSize.getBytes())

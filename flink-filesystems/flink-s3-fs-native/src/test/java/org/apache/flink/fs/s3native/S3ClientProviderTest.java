@@ -20,6 +20,7 @@ package org.apache.flink.fs.s3native;
 
 import org.apache.flink.fs.s3native.token.DynamicTemporaryAWSCredentialsProvider;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
@@ -32,7 +33,9 @@ import software.amazon.awssdk.utils.SdkAutoCloseable;
 
 import java.lang.reflect.Field;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -44,10 +47,33 @@ class S3ClientProviderTest {
     private static final String DUMMY_ENDPOINT = "http://localhost:9000";
     private static final String DUMMY_REGION = "us-east-1";
 
+    private final List<S3ClientProvider> providers = new ArrayList<>();
+
+    /** Tracks a provider so it is closed after the test, releasing its SDK/CRT resources. */
+    private S3ClientProvider track(S3ClientProvider provider) {
+        providers.add(provider);
+        return provider;
+    }
+
+    @AfterEach
+    void closeProviders() {
+        for (S3ClientProvider provider : providers) {
+            try {
+                provider.closeAsync().get(10, TimeUnit.SECONDS);
+            } catch (Exception ignored) {
+            }
+        }
+        providers.clear();
+    }
+
     @Test
     void testMinimalChainWithoutStaticOrCustom() throws Exception {
         S3ClientProvider provider =
-                S3ClientProvider.builder().endpoint(DUMMY_ENDPOINT).region(DUMMY_REGION).build();
+                track(
+                        S3ClientProvider.builder()
+                                .endpoint(DUMMY_ENDPOINT)
+                                .region(DUMMY_REGION)
+                                .build());
 
         List<AwsCredentialsProvider> chain = extractChain(provider.getCredentialsProvider());
 
@@ -59,12 +85,13 @@ class S3ClientProviderTest {
     @Test
     void testChainWithStaticCredentials() throws Exception {
         S3ClientProvider provider =
-                S3ClientProvider.builder()
-                        .accessKey("test-key")
-                        .secretKey("test-secret")
-                        .endpoint(DUMMY_ENDPOINT)
-                        .region(DUMMY_REGION)
-                        .build();
+                track(
+                        S3ClientProvider.builder()
+                                .accessKey("test-key")
+                                .secretKey("test-secret")
+                                .endpoint(DUMMY_ENDPOINT)
+                                .region(DUMMY_REGION)
+                                .build());
 
         List<AwsCredentialsProvider> chain = extractChain(provider.getCredentialsProvider());
 
@@ -80,11 +107,12 @@ class S3ClientProviderTest {
     @Test
     void testCustomProviderPrependedToChain() throws Exception {
         S3ClientProvider provider =
-                S3ClientProvider.builder()
-                        .endpoint(DUMMY_ENDPOINT)
-                        .region(DUMMY_REGION)
-                        .credentialsProviderClasses("AnonymousCredentialsProvider")
-                        .build();
+                track(
+                        S3ClientProvider.builder()
+                                .endpoint(DUMMY_ENDPOINT)
+                                .region(DUMMY_REGION)
+                                .credentialsProviderClasses("AnonymousCredentialsProvider")
+                                .build());
 
         List<AwsCredentialsProvider> chain = extractChain(provider.getCredentialsProvider());
 
@@ -97,13 +125,14 @@ class S3ClientProviderTest {
     @Test
     void testAllFourTiersActive() throws Exception {
         S3ClientProvider provider =
-                S3ClientProvider.builder()
-                        .accessKey("my-key")
-                        .secretKey("my-secret")
-                        .endpoint(DUMMY_ENDPOINT)
-                        .region(DUMMY_REGION)
-                        .credentialsProviderClasses("AnonymousCredentialsProvider")
-                        .build();
+                track(
+                        S3ClientProvider.builder()
+                                .accessKey("my-key")
+                                .secretKey("my-secret")
+                                .endpoint(DUMMY_ENDPOINT)
+                                .region(DUMMY_REGION)
+                                .credentialsProviderClasses("AnonymousCredentialsProvider")
+                                .build());
 
         List<AwsCredentialsProvider> chain = extractChain(provider.getCredentialsProvider());
 
@@ -118,12 +147,13 @@ class S3ClientProviderTest {
     @Test
     void testCustomProviderChainWithMultipleEntries() throws Exception {
         S3ClientProvider provider =
-                S3ClientProvider.builder()
-                        .endpoint(DUMMY_ENDPOINT)
-                        .region(DUMMY_REGION)
-                        .credentialsProviderClasses(
-                                "AnonymousCredentialsProvider,EnvironmentVariableCredentialsProvider")
-                        .build();
+                track(
+                        S3ClientProvider.builder()
+                                .endpoint(DUMMY_ENDPOINT)
+                                .region(DUMMY_REGION)
+                                .credentialsProviderClasses(
+                                        "AnonymousCredentialsProvider,EnvironmentVariableCredentialsProvider")
+                                .build());
 
         List<AwsCredentialsProvider> chain = extractChain(provider.getCredentialsProvider());
 
@@ -138,13 +168,14 @@ class S3ClientProviderTest {
     @Test
     void testAssumeRoleWrapsChain() {
         S3ClientProvider provider =
-                S3ClientProvider.builder()
-                        .accessKey("test-key")
-                        .secretKey("test-secret")
-                        .endpoint(DUMMY_ENDPOINT)
-                        .region(DUMMY_REGION)
-                        .assumeRoleArn("arn:aws:iam::123456789012:role/TestRole")
-                        .build();
+                track(
+                        S3ClientProvider.builder()
+                                .accessKey("test-key")
+                                .secretKey("test-secret")
+                                .endpoint(DUMMY_ENDPOINT)
+                                .region(DUMMY_REGION)
+                                .assumeRoleArn("arn:aws:iam::123456789012:role/TestRole")
+                                .build());
 
         assertThat(provider.getCredentialsProvider())
                 .isInstanceOf(StsAssumeRoleCredentialsProvider.class);
@@ -154,13 +185,14 @@ class S3ClientProviderTest {
     void testCloseClosesBaseCredentialsProviderWhenAssumeRoleWrapsIt() {
         CloseTrackingCredentialsProvider.reset();
         S3ClientProvider provider =
-                S3ClientProvider.builder()
-                        .endpoint(DUMMY_ENDPOINT)
-                        .region(DUMMY_REGION)
-                        .credentialsProviderClasses(
-                                CloseTrackingCredentialsProvider.class.getName())
-                        .assumeRoleArn("arn:aws:iam::123456789012:role/TestRole")
-                        .build();
+                track(
+                        S3ClientProvider.builder()
+                                .endpoint(DUMMY_ENDPOINT)
+                                .region(DUMMY_REGION)
+                                .credentialsProviderClasses(
+                                        CloseTrackingCredentialsProvider.class.getName())
+                                .assumeRoleArn("arn:aws:iam::123456789012:role/TestRole")
+                                .build());
 
         assertThat(provider.getCredentialsProvider())
                 .isInstanceOf(StsAssumeRoleCredentialsProvider.class);
@@ -175,11 +207,12 @@ class S3ClientProviderTest {
     @Test
     void testTokenProviderAlwaysPresentWithCustomConfig() throws Exception {
         S3ClientProvider provider =
-                S3ClientProvider.builder()
-                        .endpoint(DUMMY_ENDPOINT)
-                        .region(DUMMY_REGION)
-                        .credentialsProviderClasses("AnonymousCredentialsProvider")
-                        .build();
+                track(
+                        S3ClientProvider.builder()
+                                .endpoint(DUMMY_ENDPOINT)
+                                .region(DUMMY_REGION)
+                                .credentialsProviderClasses("AnonymousCredentialsProvider")
+                                .build());
 
         List<AwsCredentialsProvider> chain = extractChain(provider.getCredentialsProvider());
 
@@ -189,13 +222,14 @@ class S3ClientProviderTest {
     @Test
     void testDefaultProviderAlwaysTail() throws Exception {
         S3ClientProvider provider =
-                S3ClientProvider.builder()
-                        .accessKey("key")
-                        .secretKey("secret")
-                        .endpoint(DUMMY_ENDPOINT)
-                        .region(DUMMY_REGION)
-                        .credentialsProviderClasses("AnonymousCredentialsProvider")
-                        .build();
+                track(
+                        S3ClientProvider.builder()
+                                .accessKey("key")
+                                .secretKey("secret")
+                                .endpoint(DUMMY_ENDPOINT)
+                                .region(DUMMY_REGION)
+                                .credentialsProviderClasses("AnonymousCredentialsProvider")
+                                .build());
 
         List<AwsCredentialsProvider> chain = extractChain(provider.getCredentialsProvider());
 
@@ -231,7 +265,11 @@ class S3ClientProviderTest {
     @Test
     void testRetryBuilderDefaultsMatchConfigOptions() {
         S3ClientProvider provider =
-                S3ClientProvider.builder().endpoint(DUMMY_ENDPOINT).region(DUMMY_REGION).build();
+                track(
+                        S3ClientProvider.builder()
+                                .endpoint(DUMMY_ENDPOINT)
+                                .region(DUMMY_REGION)
+                                .build());
 
         assertThat(provider.getRetryBaseDelay())
                 .isEqualTo(NativeS3FileSystemFactory.RETRY_BASE_DELAY.defaultValue());
@@ -298,7 +336,11 @@ class S3ClientProviderTest {
     @Test
     void testCrtDisabledByDefault() {
         S3ClientProvider provider =
-                S3ClientProvider.builder().endpoint(DUMMY_ENDPOINT).region(DUMMY_REGION).build();
+                track(
+                        S3ClientProvider.builder()
+                                .endpoint(DUMMY_ENDPOINT)
+                                .region(DUMMY_REGION)
+                                .build());
         assertThat(provider.isUseCrt()).isFalse();
         // When CRT is disabled the async client must NOT be a CRT-backed implementation.
         assertThat(provider.getAsyncClient().getClass().getName()).doesNotContain("Crt");
@@ -314,12 +356,13 @@ class S3ClientProviderTest {
     @Test
     void testCrtFlagIsRecordedAndCrtBranchIsTaken() {
         S3ClientProvider provider =
-                S3ClientProvider.builder()
-                        .endpoint(DUMMY_ENDPOINT)
-                        .region(DUMMY_REGION)
-                        .useCrt(true)
-                        .crtTargetThroughputGbps(20.0)
-                        .build();
+                track(
+                        S3ClientProvider.builder()
+                                .endpoint(DUMMY_ENDPOINT)
+                                .region(DUMMY_REGION)
+                                .useCrt(true)
+                                .crtTargetThroughputGbps(20.0)
+                                .build());
 
         assertThat(provider.isUseCrt()).isTrue();
         assertThat(provider.getCrtTargetThroughputGbps()).isEqualTo(20.0);
@@ -329,11 +372,12 @@ class S3ClientProviderTest {
     @Test
     void testCrtEnabledWithoutThroughputOverrideStillBuildsCrtClient() {
         S3ClientProvider provider =
-                S3ClientProvider.builder()
-                        .endpoint(DUMMY_ENDPOINT)
-                        .region(DUMMY_REGION)
-                        .useCrt(true)
-                        .build();
+                track(
+                        S3ClientProvider.builder()
+                                .endpoint(DUMMY_ENDPOINT)
+                                .region(DUMMY_REGION)
+                                .useCrt(true)
+                                .build());
 
         assertThat(provider.isUseCrt()).isTrue();
         assertThat(provider.getCrtTargetThroughputGbps()).isNull();

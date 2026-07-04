@@ -73,8 +73,11 @@ resolve_crt_version() {
         echo "${AWS_CRT_VERSION}"
         return
     fi
-    local tmp_pom
-    tmp_pom="$(mktemp -d)/pom.xml"
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    # Clean up the probe directory on any return path from this function.
+    trap 'rm -rf "${tmp_dir}"' RETURN
+    local tmp_pom="${tmp_dir}/pom.xml"
     cat >"${tmp_pom}" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0">

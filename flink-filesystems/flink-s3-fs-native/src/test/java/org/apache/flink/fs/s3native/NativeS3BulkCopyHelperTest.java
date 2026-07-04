@@ -36,7 +36,6 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Proxy;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
@@ -178,7 +177,7 @@ class NativeS3BulkCopyHelperTest {
         noOpHelper.copyFiles(Collections.emptyList(), null);
     }
 
-    // --- download buffer size / stream copy tests ---
+    // --- download buffer size tests ---
 
     @Test
     void testDownloadBufferSizeIsExposed() {
@@ -190,41 +189,6 @@ class NativeS3BulkCopyHelperTest {
     void testNonPositiveDownloadBufferSizeRejected() {
         assertThatIllegalArgumentException()
                 .isThrownBy(() -> new NativeS3BulkCopyHelper(null, 1, 1, 0));
-    }
-
-    @ParameterizedTest
-    @CsvSource({"1", "7", "1024", "262144"})
-    void testCopyStreamPreservesContentAcrossBufferSizes(int bufferSize, @TempDir Path tempDir)
-            throws Exception {
-        byte[] data = new byte[100_000];
-        for (int i = 0; i < data.length; i++) {
-            data[i] = (byte) (i * 31 + 7);
-        }
-        Path dest = tempDir.resolve("out-" + bufferSize + ".bin");
-
-        NativeS3BulkCopyHelper.copyStream(new ByteArrayInputStream(data), dest, bufferSize);
-
-        assertThat(Files.readAllBytes(dest)).isEqualTo(data);
-    }
-
-    @Test
-    void testCopyStreamOverwritesExistingFile(@TempDir Path tempDir) throws Exception {
-        Path dest = tempDir.resolve("out.bin");
-        Files.write(dest, new byte[] {9, 9, 9, 9, 9});
-        byte[] data = {1, 2, 3};
-
-        NativeS3BulkCopyHelper.copyStream(new ByteArrayInputStream(data), dest, 256 * 1024);
-
-        assertThat(Files.readAllBytes(dest)).isEqualTo(data);
-    }
-
-    @Test
-    void testCopyStreamEmptySource(@TempDir Path tempDir) throws Exception {
-        Path dest = tempDir.resolve("empty.bin");
-
-        NativeS3BulkCopyHelper.copyStream(new ByteArrayInputStream(new byte[0]), dest, 1024);
-
-        assertThat(Files.readAllBytes(dest)).isEmpty();
     }
 
     @Test

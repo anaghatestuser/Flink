@@ -22,18 +22,37 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.IllegalConfigurationException;
 import org.apache.flink.configuration.MemorySize;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.auth.credentials.AwsCredentials;
 
 import java.io.IOException;
 import java.net.URI;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for {@link NativeS3FileSystemFactory}. */
 class NativeS3FileSystemFactoryTest {
+
+    private final List<NativeS3FileSystem> createdFileSystems = new ArrayList<>();
+
+    @AfterEach
+    void closeCreatedFileSystems() {
+        for (NativeS3FileSystem fs : createdFileSystems) {
+            try {
+                fs.closeAsync().get(10, TimeUnit.SECONDS);
+            } catch (Exception ignored) {
+                // best-effort cleanup of test resources
+            }
+        }
+        createdFileSystems.clear();
+    }
+
     private static Configuration baseConfig() {
         Configuration config = new Configuration();
         config.setString("s3.access-key", "test-access-key");
@@ -43,16 +62,22 @@ class NativeS3FileSystemFactoryTest {
         return config;
     }
 
-    private static NativeS3FileSystem createFs(Configuration config) throws Exception {
+    private NativeS3FileSystem createFs(Configuration config) throws Exception {
         NativeS3FileSystemFactory factory = new NativeS3FileSystemFactory();
         factory.configure(config);
-        return (NativeS3FileSystem) factory.create(URI.create("s3://test-bucket/"));
+        NativeS3FileSystem fs =
+                (NativeS3FileSystem) factory.create(URI.create("s3://test-bucket/"));
+        createdFileSystems.add(fs);
+        return fs;
     }
 
-    private static NativeS3FileSystem createS3aFs(Configuration config) throws Exception {
+    private NativeS3FileSystem createS3aFs(Configuration config) throws Exception {
         NativeS3AFileSystemFactory factory = new NativeS3AFileSystemFactory();
         factory.configure(config);
-        return (NativeS3FileSystem) factory.create(URI.create("s3a://test-bucket/"));
+        NativeS3FileSystem fs =
+                (NativeS3FileSystem) factory.create(URI.create("s3a://test-bucket/"));
+        createdFileSystems.add(fs);
+        return fs;
     }
 
     @Test
@@ -176,6 +201,7 @@ class NativeS3FileSystemFactoryTest {
     @Test
     void testNonPositiveCrtTargetThroughputThrowsException() {
         Configuration config = baseConfig();
+        config.set(NativeS3FileSystemFactory.CRT_ENABLED, true);
         config.set(NativeS3FileSystemFactory.CRT_TARGET_THROUGHPUT_GBPS, 0.0);
         assertThatThrownBy(() -> createFs(config))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -232,6 +258,7 @@ class NativeS3FileSystemFactoryTest {
     @Test
     void testNonPositiveCrtMaxConcurrencyThrowsException() {
         Configuration config = baseConfig();
+        config.set(NativeS3FileSystemFactory.CRT_ENABLED, true);
         config.set(NativeS3FileSystemFactory.CRT_MAX_CONCURRENCY, 0);
 
         assertThatThrownBy(() -> createFs(config))
@@ -243,6 +270,7 @@ class NativeS3FileSystemFactoryTest {
     @Test
     void testNonPositiveCrtReadBufferSizeThrowsException() {
         Configuration config = baseConfig();
+        config.set(NativeS3FileSystemFactory.CRT_ENABLED, true);
         config.set(NativeS3FileSystemFactory.CRT_READ_BUFFER_SIZE, MemorySize.ZERO);
 
         assertThatThrownBy(() -> createFs(config))
@@ -254,6 +282,7 @@ class NativeS3FileSystemFactoryTest {
     @Test
     void testNonPositiveCrtMaxNativeMemoryLimitThrowsException() {
         Configuration config = baseConfig();
+        config.set(NativeS3FileSystemFactory.CRT_ENABLED, true);
         config.set(NativeS3FileSystemFactory.CRT_MAX_NATIVE_MEMORY_LIMIT, MemorySize.ZERO);
 
         assertThatThrownBy(() -> createFs(config))

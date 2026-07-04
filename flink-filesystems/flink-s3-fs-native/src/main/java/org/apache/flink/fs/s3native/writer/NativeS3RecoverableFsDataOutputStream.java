@@ -21,6 +21,7 @@ package org.apache.flink.fs.s3native.writer;
 import org.apache.flink.core.fs.RecoverableFsDataOutputStream;
 import org.apache.flink.core.fs.RecoverableWriter;
 import org.apache.flink.fs.s3native.writer.NativeS3Recoverable.PartETag;
+import org.apache.flink.util.ExceptionUtils;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -196,16 +197,12 @@ class NativeS3RecoverableFsDataOutputStream extends RecoverableFsDataOutputStrea
     private void uploadCurrentPart() throws IOException {
         currentOutputStream.close();
 
-        int partNumber = nextPartNumber;
-        NativeS3ObjectOperations.UploadPartResult result;
-        try {
-            result =
-                    s3AccessHelper.uploadPart(
-                            key, uploadId, partNumber, currentTempFile, currentPartSize);
-        } catch (IOException e) {
-            Files.delete(currentTempFile.toPath());
-            throw e;
-        }
+        // Do not delete the temp file if uploadPart fails: propagate the original exception
+        // unmasked and let close() perform cleanup. nextPartNumber is only advanced on success so a
+        // failed attempt does not leave a gap in the part sequence.
+        NativeS3ObjectOperations.UploadPartResult result =
+                s3AccessHelper.uploadPart(
+                        key, uploadId, nextPartNumber, currentTempFile, currentPartSize);
 
         nextPartNumber++;
         completedParts.add(new PartETag(result.getPartNumber(), result.getETag()));
@@ -280,14 +277,14 @@ class NativeS3RecoverableFsDataOutputStream extends RecoverableFsDataOutputStrea
                     try {
                         currentOutputStream.close();
                     } catch (IOException e) {
-                        cleanupException = e;
+                        cleanupException = ExceptionUtils.firstOrSuppressed(e, cleanupException);
                     }
                 }
                 if (currentTempFile != null && currentTempFile.exists()) {
                     try {
                         Files.delete(currentTempFile.toPath());
                     } catch (IOException e) {
-                        cleanupException = e;
+                        cleanupException = ExceptionUtils.firstOrSuppressed(e, cleanupException);
                     }
                 }
 

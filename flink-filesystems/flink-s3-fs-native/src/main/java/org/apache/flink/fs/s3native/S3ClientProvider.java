@@ -389,10 +389,13 @@ class S3ClientProvider implements AutoCloseableAsync {
                                 }
                             }
                         })
-                .orTimeout(clientCloseTimeout.toSeconds(), TimeUnit.SECONDS)
+                .orTimeout(clientCloseTimeout.toMillis(), TimeUnit.MILLISECONDS)
                 .exceptionally(
                         ex -> {
-                            LOG.error("S3 client close timed out after {}", clientCloseTimeout, ex);
+                            LOG.error(
+                                    "S3 client close did not complete cleanly within {}",
+                                    clientCloseTimeout,
+                                    ex);
                             return null;
                         });
     }
@@ -789,36 +792,41 @@ class S3ClientProvider implements AutoCloseableAsync {
                             .serviceConfiguration(s3Config)
                             .overrideConfiguration(overrideConfig);
 
-            if (useCrt) {
-                // Note: AwsCrtHttpClient.Builder does not expose a `readTimeout(Duration)`
-                // equivalent of the Apache client's socket timeout. The CRT runtime relies
-                // on `ConnectionHealthConfiguration` for stalled-read detection instead, so
-                // the `s3.socket.timeout` setting is silently ignored in CRT mode.
-                AwsCrtHttpClient.Builder crtHttpBuilder =
-                        AwsCrtHttpClient.builder()
-                                .maxConcurrency(crtMaxConcurrency)
-                                .connectionTimeout(connectionTimeout)
-                                .connectionMaxIdleTime(connectionMaxIdleTime);
-                if (crtReadBufferSizeInBytes != null) {
-                    crtHttpBuilder.readBufferSizeInBytes(crtReadBufferSizeInBytes);
-                }
-                clientBuilder.httpClientBuilder(crtHttpBuilder);
-            } else {
-                clientBuilder.httpClientBuilder(
-                        ApacheHttpClient.builder()
-                                .maxConnections(maxConnections)
-                                .connectionTimeout(connectionTimeout)
-                                .socketTimeout(socketTimeout)
-                                .tcpKeepAlive(true)
-                                .connectionMaxIdleTime(connectionMaxIdleTime));
-            }
-            if (endpointUri != null) {
-                clientBuilder.endpointOverride(endpointUri);
-            }
             try {
+                if (useCrt) {
+                    // Note: AwsCrtHttpClient.Builder does not expose a `readTimeout(Duration)`
+                    // equivalent of the Apache client's socket timeout. The CRT runtime relies
+                    // on `ConnectionHealthConfiguration` for stalled-read detection instead, so
+                    // the `s3.socket.timeout` setting is silently ignored in CRT mode.
+                    AwsCrtHttpClient.Builder crtHttpBuilder =
+                            AwsCrtHttpClient.builder()
+                                    .maxConcurrency(crtMaxConcurrency)
+                                    .connectionTimeout(connectionTimeout)
+                                    .connectionMaxIdleTime(connectionMaxIdleTime);
+                    if (crtReadBufferSizeInBytes != null) {
+                        crtHttpBuilder.readBufferSizeInBytes(crtReadBufferSizeInBytes);
+                    }
+                    clientBuilder.httpClientBuilder(crtHttpBuilder);
+                } else {
+                    clientBuilder.httpClientBuilder(
+                            ApacheHttpClient.builder()
+                                    .maxConnections(maxConnections)
+                                    .connectionTimeout(connectionTimeout)
+                                    .socketTimeout(socketTimeout)
+                                    .tcpKeepAlive(true)
+                                    .connectionMaxIdleTime(connectionMaxIdleTime));
+                }
+                if (endpointUri != null) {
+                    clientBuilder.endpointOverride(endpointUri);
+                }
                 return clientBuilder.build();
             } catch (LinkageError e) {
                 if (useCrt) {
+                    throw new IllegalStateException(crtMissingJarsMessage(), e);
+                }
+                throw e;
+            } catch (IllegalStateException e) {
+                if (useCrt && isCrtClasspathFailure(e)) {
                     throw new IllegalStateException(crtMissingJarsMessage(), e);
                 }
                 throw e;

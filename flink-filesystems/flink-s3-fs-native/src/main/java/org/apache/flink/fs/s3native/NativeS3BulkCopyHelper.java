@@ -22,6 +22,8 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.core.fs.ICloseableRegistry;
 import org.apache.flink.core.fs.PathsCopyingFileSystem;
+import org.apache.flink.util.ExceptionUtils;
+import org.apache.flink.util.IOUtils;
 import org.apache.flink.util.concurrent.ExecutorThreadFactory;
 
 import org.slf4j.Logger;
@@ -35,12 +37,8 @@ import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -246,7 +244,7 @@ class NativeS3BulkCopyHelper {
         if (parent != null) {
             Files.createDirectories(parent);
         }
-        Path tempDestination = createTemporaryDownloadFile(parent, destination);
+        Path tempDestination = NativeS3FileIoUtils.createTemporaryDownloadFile(parent, destination);
 
         GetObjectRequest getObjectRequest =
                 GetObjectRequest.builder().bucket(bucket).key(key).build();
@@ -257,7 +255,7 @@ class NativeS3BulkCopyHelper {
                     asyncClient.getObject(
                             getObjectRequest, AsyncResponseTransformer.toBlockingInputStream());
         } catch (RuntimeException | Error e) {
-            deleteQuietly(tempDestination);
+            IOUtils.deleteFileQuietly(tempDestination);
             throw e;
         }
         cancellation.registerFuture(responseFuture);
@@ -267,12 +265,12 @@ class NativeS3BulkCopyHelper {
                 (responseStream, error) -> {
                     cancellation.unregisterFuture(responseFuture);
                     if (error != null) {
-                        deleteQuietly(tempDestination);
+                        IOUtils.deleteFileQuietly(tempDestination);
                         copyFuture.completeExceptionally(error);
                         return;
                     }
                     if (responseStream == null) {
-                        deleteQuietly(tempDestination);
+                        IOUtils.deleteFileQuietly(tempDestination);
                         copyFuture.completeExceptionally(
                                 new IOException(
                                         "S3 getObject completed without a response stream"));
@@ -294,7 +292,7 @@ class NativeS3BulkCopyHelper {
                         responseFuture.cancel(true);
                     }
                     if (error != null) {
-                        deleteQuietly(tempDestination);
+                        IOUtils.deleteFileQuietly(tempDestination);
                     }
                 });
         return copyFuture;
@@ -310,48 +308,41 @@ class NativeS3BulkCopyHelper {
             CompletableFuture<Void> copyFuture) {
         if (!cancellation.registerStream(responseStream)) {
             abortAndClose(responseStream);
-            deleteQuietly(tempDestination);
+            IOUtils.deleteFileQuietly(tempDestination);
             copyFuture.completeExceptionally(new CancellationException("Bulk copy was cancelled"));
             return;
         }
         try {
             downloadPool.execute(
                     () -> {
+                        boolean success = false;
                         try {
-                            copyStream(responseStream, tempDestination, downloadBufferSize);
-                            moveFile(tempDestination, destination);
+                            NativeS3FileIoUtils.copyStream(
+                                    responseStream, tempDestination, downloadBufferSize);
+                            NativeS3FileIoUtils.moveFile(tempDestination, destination);
+                            success = true;
                             LOG.debug("Successfully copied {} to {}", sourceUri, destination);
                             copyFuture.complete(null);
                         } catch (Throwable t) {
                             copyFuture.completeExceptionally(t);
                         } finally {
                             cancellation.unregisterStream(responseStream);
-                            deleteQuietly(tempDestination);
+                            // Close on success (stream fully read, connection reusable); abort on
+                            // failure to drop the connection immediately instead of draining a
+                            // large partially-read body.
+                            if (success) {
+                                closeQuietly(responseStream);
+                            } else {
+                                abortAndClose(responseStream);
+                            }
+                            IOUtils.deleteFileQuietly(tempDestination);
                         }
                     });
         } catch (RejectedExecutionException e) {
             cancellation.unregisterStream(responseStream);
             abortAndClose(responseStream);
-            deleteQuietly(tempDestination);
+            IOUtils.deleteFileQuietly(tempDestination);
             copyFuture.completeExceptionally(e);
-        }
-    }
-
-    /**
-     * Copies all bytes from {@code in} to {@code destination}, overwriting any existing file, using
-     * a fixed-size heap buffer. Writing through a bounded {@code byte[]} keeps the JDK's cached
-     * temporary direct buffers small, avoiding the direct-memory growth of the SDK's {@code
-     * AsynchronousFileChannel} download path.
-     */
-    @VisibleForTesting
-    static void copyStream(InputStream in, Path destination, int bufferSize) throws IOException {
-        try (InputStream source = in;
-                OutputStream out = Files.newOutputStream(destination)) {
-            byte[] buffer = new byte[bufferSize];
-            int numBytes;
-            while ((numBytes = source.read(buffer)) != -1) {
-                out.write(buffer, 0, numBytes);
-            }
         }
     }
 
@@ -378,6 +369,7 @@ class NativeS3BulkCopyHelper {
             throw new IOException("Bulk copy interrupted", e);
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
+            ExceptionUtils.rethrowIfFatalError(cause);
             if (isConnectionPoolExhausted(cause)) {
                 throw new IOException(
                         String.format(
@@ -405,38 +397,6 @@ class NativeS3BulkCopyHelper {
         return scheme == null || "file".equalsIgnoreCase(scheme);
     }
 
-    private static void moveFile(Path source, Path destination) throws IOException {
-        try {
-            Files.move(
-                    source,
-                    destination,
-                    StandardCopyOption.REPLACE_EXISTING,
-                    StandardCopyOption.ATOMIC_MOVE);
-        } catch (AtomicMoveNotSupportedException ignored) {
-            Files.move(source, destination, StandardCopyOption.REPLACE_EXISTING);
-        }
-    }
-
-    private static Path createTemporaryDownloadFile(Path parent, Path destination)
-            throws IOException {
-        String prefix =
-                destination.getFileName() == null
-                        ? "s3-download"
-                        : destination.getFileName().toString();
-        if (prefix.length() < 3) {
-            prefix = "s3-" + prefix;
-        }
-        return Files.createTempFile(parent, prefix, ".tmp");
-    }
-
-    private static void deleteQuietly(Path path) {
-        try {
-            Files.deleteIfExists(path);
-        } catch (IOException e) {
-            LOG.debug("Could not delete temporary bulk-copy file {}", path, e);
-        }
-    }
-
     private static void abortAndClose(ResponseInputStream<GetObjectResponse> stream) {
         try {
             stream.abort();
@@ -447,6 +407,14 @@ class NativeS3BulkCopyHelper {
             stream.close();
         } catch (IOException e) {
             LOG.debug("Error closing S3 response stream during bulk-copy cancellation", e);
+        }
+    }
+
+    private static void closeQuietly(ResponseInputStream<GetObjectResponse> stream) {
+        try {
+            stream.close();
+        } catch (IOException e) {
+            LOG.debug("Error closing S3 response stream after successful bulk-copy download", e);
         }
     }
 
