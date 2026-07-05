@@ -102,7 +102,8 @@ object PythonCalcSplitRule {
    */
   private val callFinder = new PythonRemoteCallFinder()
   val SPLIT_CONDITION: RelOptRule = new RemoteCalcSplitConditionRule(callFinder)
-  val CONDITION_PROJECTION_CSE: RelOptRule = new RemoteCalcConditionProjectionCseRule(callFinder)
+  val CONDITION_PROJECTION_CSE: RelOptRule =
+    RemoteCalcConditionProjectionCseRule.Config.DEFAULT.withRemoteCallFinder(callFinder).toRule()
   val SPLIT_PROJECT: RelOptRule = new RemoteCalcSplitProjectionRule(callFinder)
   val SPLIT_PANDAS_IN_PROJECT: RelOptRule = new PythonCalcSplitPandasInProjectionRule(callFinder)
   val SPLIT_PROJECTION_REX_FIELD: RelOptRule = new RemoteCalcSplitProjectionRexFieldRule(callFinder)
