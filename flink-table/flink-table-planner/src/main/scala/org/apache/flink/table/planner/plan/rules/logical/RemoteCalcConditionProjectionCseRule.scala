@@ -49,7 +49,7 @@ import scala.collection.JavaConversions._
  * @param callFinder
  *   the finder used to identify remote (Python) function calls
  */
-class RemoteCalcConditionProjectionCseRule(private val callFinder: RemoteCalcCallFinder)
+class RemoteCalcConditionProjectionCseRule(private val callFinder: RemoteCallFinder)
   extends RelOptRule(
     operand(classOf[FlinkLogicalCalc], operand(classOf[FlinkLogicalCalc], any)),
     "RemoteCalcConditionProjectionCseRule") {
