@@ -18,6 +18,8 @@
 
 package org.apache.flink.table.planner.plan.stream.sql;
 
+import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedScalarFunctions.BooleanPythonScalarFunction;
 import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedScalarFunctions.PythonScalarFunction;
 import org.apache.flink.table.planner.utils.JavaStreamTableTestUtil;
@@ -38,9 +40,13 @@ class PythonCalcConditionCseTest extends TableTestBase {
 
     @BeforeEach
     void setup() {
-        util.tableEnv()
-                .executeSql(
-                        "CREATE TABLE MyTable (a INT, b INT, c INT) WITH ('connector' = 'values')");
+        util.addTableSource(
+                "MyTable",
+                Schema.newBuilder()
+                        .column("a", DataTypes.INT())
+                        .column("b", DataTypes.INT())
+                        .column("c", DataTypes.INT())
+                        .build());
         util.tableEnv()
                 .createTemporarySystemFunction("pyFunc1", new PythonScalarFunction("pyFunc1"));
         util.tableEnv()
