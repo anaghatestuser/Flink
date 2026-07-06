@@ -224,15 +224,34 @@ public abstract class CommonExecPythonCalc extends ExecNodeBase<RowData>
     private InternalTypeInfo<RowData> buildDedupOutputTypeInfo(
             List<Integer> forwardedFields,
             LogicalType[] inputLogicalTypes,
-            List<RexCall> uniquePythonRexCalls) {
+            List<RexCall> uniquePythonRexCalls,
+            List<String> outputFieldNames) {
         List<LogicalType> fieldTypes = new ArrayList<>();
+        List<String> fieldNames = new ArrayList<>();
         for (int idx : forwardedFields) {
             fieldTypes.add(inputLogicalTypes[idx]);
         }
         for (RexCall call : uniquePythonRexCalls) {
             fieldTypes.add(FlinkTypeFactory.toLogicalType(call.getType()));
         }
-        return InternalTypeInfo.ofFields(fieldTypes.toArray(new LogicalType[0]));
+        // Assign field names: use output field names for forwarded fields first,
+        // then for UDF results. When needsExpansionProjection is true, the unique
+        // call count may differ from the output field count; in that case the
+        // expansion projection handles the mapping, and the intermediate field
+        // names are derived from the output field names where possible.
+        int totalFields = fieldTypes.size();
+        int forwardedCount = forwardedFields.size();
+        for (int i = 0; i < totalFields && i < outputFieldNames.size(); i++) {
+            fieldNames.add(outputFieldNames.get(i));
+        }
+        // Fill remaining names (if unique calls count exceeds output names, e.g.
+        // flattened nested calls produce more fields than the output schema)
+        for (int i = fieldNames.size(); i < totalFields; i++) {
+            fieldNames.add("f" + i);
+        }
+        return InternalTypeInfo.ofFields(
+                fieldTypes.toArray(new LogicalType[0]),
+                fieldNames.toArray(new String[0]));
     }
 
     // -------------------------------------------------------------------------
@@ -290,8 +309,13 @@ public abstract class CommonExecPythonCalc extends ExecNodeBase<RowData>
                 (InternalTypeInfo<RowData>) inputTransform.getOutputType();
 
         // Build output type using deduplicated unique calls
+        RowType outputType = (RowType) getOutputType();
         InternalTypeInfo<RowData> pythonOperatorResultTypeInfo =
-                buildDedupOutputTypeInfo(forwardedFields, inputLogicalTypes, uniquePythonRexCalls);
+                buildDedupOutputTypeInfo(
+                        forwardedFields,
+                        inputLogicalTypes,
+                        uniquePythonRexCalls,
+                        outputType.getFieldNames());
 
         OneInputStreamOperator<RowData, RowData> pythonOperator =
                 getPythonScalarFunctionOperator(

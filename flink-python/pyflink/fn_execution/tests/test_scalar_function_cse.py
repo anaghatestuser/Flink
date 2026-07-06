@@ -209,5 +209,70 @@ class TestScalarFunctionCse(unittest.TestCase):
         # udf2(udf1(5)) = udf2(10) = 20
         self.assertEqual(result2[0], 20)
 
+    def test_cse_with_takes_row_as_input(self):
+        """
+        Verify that when takesRowAsInput=True but the UDF receives its input
+        via refIndex (CSE), the generated code uses results[N] instead of
+        overriding with `value`.
+
+        Scenario: func(value[0]) returns Row, func2 consumes func's result via refIndex.
+        func2 has takesRowAsInput=True because in the original plan it received a Row.
+        After CSE flattening, it should receive results[0] (func's output), not `value`
+        (the original input row).
+
+        This simulates the PythonMapMergeRule + CSE flattening for:
+            .map(func(t.a)).map(func2)
+        where func2 takes Row as input.
+        """
+        # func: returns Row(a, b)
+        func_payload = _make_udf_payload(lambda x: type('Row', (), {'a': x + 1, 'b': x * x})())
+        # Better: use actual Row
+        from pyflink.common import Row
+        func_payload = _make_udf_payload(lambda x: Row(a=x + 1, b=x * x))
+
+        # func2: takes Row, returns Row
+        func2_payload = _make_udf_payload(lambda x: Row(a=x.a + 1, b=x.b * 2))
+
+        # func: takesRowAsInput=False, reads from value[0]
+        func_proto = _make_udf_proto(func_payload, [_input_offset(0)])
+        func_proto.takes_row_as_input = False
+
+        # func2: takesRowAsInput=True, references func's result via refIndex=0
+        func2_proto = _make_udf_proto(func2_payload, [_input_ref_index(0)])
+        func2_proto.takes_row_as_input = True
+
+        serialized_fn = _build_serialized_fn([func_proto, func2_proto])
+
+        op = ScalarFunctionOperation(serialized_fn)
+
+        # Verify the function name confirms CSE codegen path
+        self.assertEqual(op.func.__name__, '_sequential_execute')
+
+        # Verify the generated code
+        generated_code = op._generated_code
+        self.assertIn('def _sequential_execute(value):', generated_code)
+        # func2 (results[1]) should receive results[0], NOT `value`
+        line2 = [l for l in generated_code.split('\n') if 'results[1]' in l][0]
+        self.assertIn('results[0]', line2, "func2 should receive results[0], not value")
+
+        # Verify computation
+        result = op.func([3])
+        # func(3) = Row(a=4, b=9)
+        # func2(Row(4, 9)) = Row(a=5, b=18)
+        self.assertEqual(result[0].a, 4)
+        self.assertEqual(result[0].b, 9)
+        self.assertEqual(result[1].a, 5)
+        self.assertEqual(result[1].b, 18)
+
+        # Verify idempotency
+        result2 = op.func([5])
+        # func(5) = Row(a=6, b=25)
+        # func2(Row(6, 25)) = Row(a=7, b=50)
+        self.assertEqual(result2[0].a, 6)
+        self.assertEqual(result2[0].b, 25)
+        self.assertEqual(result2[1].a, 7)
+        self.assertEqual(result2[1].b, 50)
+
+
 if __name__ == '__main__':
     unittest.main()
