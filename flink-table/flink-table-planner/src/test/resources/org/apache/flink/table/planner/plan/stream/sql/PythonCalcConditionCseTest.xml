@@ -57,9 +57,7 @@ PythonCalc(select=[pyFunc1(a, b) AS EXPR$0])
   </TestCase>
   <TestCase name="testMultipleUdfsSharedBetweenConditionAndProjection">
     <Resource name="sql">
-      <![CDATA[SELECT pyFunc1(a, b) + pyFunc2(b, c)
-FROM MyTable
-WHERE pyFunc1(a, b) > 0 AND pyFunc2(b, c) > 0]]>
+      <![CDATA[SELECT pyFunc1(a, b) + pyFunc2(b, c) FROM MyTable WHERE pyFunc1(a, b) > 0 AND pyFunc2(b, c) > 0]]>
     </Resource>
     <Resource name="ast">
       <![CDATA[
@@ -99,9 +97,7 @@ Calc(select=[f00 AS EXPR$0, f0 AS EXPR$1])
   </TestCase>
   <TestCase name="testNestedUdfWithCseAnnotation">
     <Resource name="sql">
-      <![CDATA[SELECT pyFunc1(a, b), pyFunc1(pyFunc1(a, b), c), pyFunc1(pyFunc1(pyFunc1(a, b), c), a)
-FROM MyTable
-WHERE pyFunc1(a, b) > 0]]>
+      <![CDATA[SELECT pyFunc1(a, b), pyFunc1(pyFunc1(a, b), c), pyFunc1(pyFunc1(pyFunc1(a, b), c), a) FROM MyTable WHERE pyFunc1(a, b) > 0]]>
     </Resource>
     <Resource name="ast">
       <![CDATA[
@@ -121,9 +117,7 @@ PythonCalc(select=[f0 AS EXPR$0, pyFunc1(f0, c) AS EXPR$1, pyFunc1(pyFunc1(f0, c
   </TestCase>
   <TestCase name="testRepeatedUdfCallsInProjectionWithCondition">
     <Resource name="sql">
-      <![CDATA[SELECT pyFunc1(a, b) + 1, pyFunc1(a, b) + 2, pyFunc1(a, b) + 3
-FROM MyTable
-WHERE pyFunc1(a, b) > 0]]>
+      <![CDATA[SELECT pyFunc1(a, b) + 1, pyFunc1(a, b) + 2, pyFunc1(a, b) + 3 FROM MyTable WHERE pyFunc1(a, b) > 0]]>
     </Resource>
     <Resource name="ast">
       <![CDATA[

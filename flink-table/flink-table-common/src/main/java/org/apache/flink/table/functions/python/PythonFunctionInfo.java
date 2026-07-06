@@ -55,6 +55,7 @@ public class PythonFunctionInfo implements Serializable {
      * call that appears in multiple positions can be computed once and its result referenced by
      * index.
      */
+    @Internal
     public static class ResultRef implements Serializable {
         private static final long serialVersionUID = 1L;
 
