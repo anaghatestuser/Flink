@@ -250,8 +250,7 @@ public abstract class CommonExecPythonCalc extends ExecNodeBase<RowData>
             fieldNames.add("f" + i);
         }
         return InternalTypeInfo.ofFields(
-                fieldTypes.toArray(new LogicalType[0]),
-                fieldNames.toArray(new String[0]));
+                fieldTypes.toArray(new LogicalType[0]), fieldNames.toArray(new String[0]));
     }
 
     // -------------------------------------------------------------------------
