@@ -18,24 +18,39 @@
 
 package org.apache.flink.runtime.security.token;
 
+import org.apache.flink.api.common.JobID;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.security.token.DelegationTokenProvider;
 import org.apache.flink.core.security.token.DelegationTokenReceiver;
 import org.apache.flink.core.testutils.ManuallyTriggeredScheduledExecutorService;
 import org.apache.flink.util.concurrent.ManuallyTriggeredScheduledExecutor;
+import org.apache.flink.util.concurrent.ScheduledExecutor;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
 import java.time.Duration;
 import java.time.ZoneId;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static java.time.Instant.ofEpochMilli;
@@ -43,7 +58,9 @@ import static org.apache.flink.configuration.ConfigurationUtils.getBooleanConfig
 import static org.apache.flink.configuration.SecurityOptions.DELEGATION_TOKENS_RENEWAL_RETRY_INITIAL_BACKOFF;
 import static org.apache.flink.configuration.SecurityOptions.DELEGATION_TOKENS_RENEWAL_RETRY_MAX_BACKOFF;
 import static org.apache.flink.configuration.SecurityOptions.DELEGATION_TOKENS_RENEWAL_TIME_RATIO;
+import static org.apache.flink.configuration.SecurityOptions.DELEGATION_TOKENS_REOBTAIN_COOLDOWN;
 import static org.apache.flink.core.security.token.DelegationTokenProvider.CONFIG_PREFIX;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -191,7 +208,7 @@ public class DefaultDelegationTokenManagerTest {
     }
 
     @Test
-    public void startTokensUpdateShouldScheduleRenewal() {
+    public void startTokensUpdateShouldScheduleRenewal() throws Exception {
         final ManuallyTriggeredScheduledExecutor scheduledExecutor =
                 new ManuallyTriggeredScheduledExecutor();
         final ManuallyTriggeredScheduledExecutorService scheduler =
@@ -200,6 +217,8 @@ public class DefaultDelegationTokenManagerTest {
         ExceptionThrowingDelegationTokenProvider.addToken.set(true);
         Configuration configuration = new Configuration();
         configuration.set(getBooleanConfigOption(CONFIG_PREFIX + ".throw.enabled"), true);
+        configuration.set(getBooleanConfigOption(CONFIG_PREFIX + ".hadoopfs.enabled"), false);
+        configuration.set(getBooleanConfigOption(CONFIG_PREFIX + ".hbase.enabled"), false);
         AtomicInteger startTokensUpdateCallCount = new AtomicInteger(0);
         DefaultDelegationTokenManager delegationTokenManager =
                 new DefaultDelegationTokenManager(
@@ -211,8 +230,9 @@ public class DefaultDelegationTokenManagerTest {
                     }
                 };
 
-        delegationTokenManager.startTokensUpdate();
+        // The first two cycles fail and schedule a retry each. The third succeeds.
         ExceptionThrowingDelegationTokenProvider.throwInUsage.set(true);
+        delegationTokenManager.start(tokens -> {});
         scheduledExecutor.triggerScheduledTasks();
         scheduler.triggerAll();
         ExceptionThrowingDelegationTokenProvider.throwInUsage.set(false);
@@ -299,5 +319,614 @@ public class DefaultDelegationTokenManagerTest {
         // Delay must not exceed the TTL cap (30 s / 3 = 10 s), with jitter the max is 10 s.
         assertTrue(delay <= Duration.ofSeconds(10).toMillis());
         assertTrue(delay >= 0);
+    }
+
+    @Test
+    public void registerJobShouldTriggerImmediateRenewalAndTrackJob() throws Exception {
+        final ManuallyTriggeredScheduledExecutor scheduledExecutor =
+                new ManuallyTriggeredScheduledExecutor();
+        final ManuallyTriggeredScheduledExecutorService scheduler =
+                new ManuallyTriggeredScheduledExecutorService();
+
+        Configuration configuration = new Configuration();
+        configuration.set(getBooleanConfigOption(CONFIG_PREFIX + ".throw.enabled"), true);
+        configuration.set(getBooleanConfigOption(CONFIG_PREFIX + ".hadoopfs.enabled"), false);
+        configuration.set(getBooleanConfigOption(CONFIG_PREFIX + ".hbase.enabled"), false);
+        AtomicInteger startTokensUpdateCallCount = new AtomicInteger(0);
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(
+                        configuration, null, scheduledExecutor, scheduler) {
+                    @Override
+                    void startTokensUpdate() {
+                        startTokensUpdateCallCount.incrementAndGet();
+                        super.startTokensUpdate();
+                    }
+                };
+        // Ask the provider to request an immediate refresh when the job is registered.
+        ExceptionThrowingDelegationTokenProvider.shouldReobtainOnRegister.set(true);
+
+        delegationTokenManager.start(tokens -> {});
+        // Only count the cycle triggered by the registration below, not start()'s inline cycle.
+        startTokensUpdateCallCount.set(0);
+
+        JobID jobId = JobID.generate();
+        delegationTokenManager.registerJob(jobId, new Configuration());
+        scheduledExecutor.triggerScheduledTasks();
+        scheduler.triggerAll();
+
+        assertEquals(1, startTokensUpdateCallCount.get());
+        assertEquals(1, ExceptionThrowingDelegationTokenProvider.registeredJobs.get().size());
+
+        delegationTokenManager.unregisterJob(jobId);
+        assertEquals(0, ExceptionThrowingDelegationTokenProvider.registeredJobs.get().size());
+    }
+
+    @Test
+    public void stopShouldStopProviders() {
+        Configuration configuration = new Configuration();
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(configuration, null, null, null);
+
+        delegationTokenManager.stop();
+
+        assertTrue(ExceptionThrowingDelegationTokenProvider.stopped.get());
+    }
+
+    @Test
+    public void registerJobShouldRollBackAndRethrowWhenProviderThrows() throws Exception {
+        Configuration configuration = new Configuration();
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(configuration, null, null, null);
+
+        JobID jobId = JobID.generate();
+        delegationTokenManager.registerJob(jobId, new Configuration());
+        assertEquals(1, ExceptionThrowingDelegationTokenProvider.registeredJobs.get().size());
+
+        // A provider that throws during registration must cause the job to be unregistered from
+        // all providers and the exception to be rethrown.
+        ExceptionThrowingDelegationTokenProvider.throwInRegister.set(true);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> delegationTokenManager.registerJob(jobId, new Configuration()));
+        assertEquals(0, ExceptionThrowingDelegationTokenProvider.registeredJobs.get().size());
+    }
+
+    @Test
+    public void registerJobFailureWithLinkageErrorMustRollBackProviders() {
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(new Configuration(), null, null, null);
+
+        // A LinkageError from provider plugin code (e.g. a NoClassDefFoundError, the same failure
+        // class loadProviders special-cases at init) must get the same treatment as an exception:
+        // roll the registration back on all providers, log, and rethrow.
+        ExceptionThrowingDelegationTokenProvider.throwErrorInRegister.set(true);
+        JobID jobId = JobID.generate();
+
+        assertThrows(
+                NoClassDefFoundError.class,
+                () -> delegationTokenManager.registerJob(jobId, new Configuration()));
+        assertTrue(
+                ExceptionThrowingDelegationTokenProvider.registeredJobs.get().isEmpty(),
+                "A registration that failed with a LinkageError must be rolled back on all"
+                        + " providers");
+    }
+
+    @Test
+    public void unregisterJobShouldSwallowProviderFailure() throws Exception {
+        Configuration configuration = new Configuration();
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(configuration, null, null, null);
+
+        JobID jobId = JobID.generate();
+        delegationTokenManager.registerJob(jobId, new Configuration());
+
+        // A provider that throws during unregistration must not prevent cleanup from completing.
+        ExceptionThrowingDelegationTokenProvider.throwInUnregister.set(true);
+        assertDoesNotThrow(() -> delegationTokenManager.unregisterJob(jobId));
+    }
+
+    @Test
+    public void unregisterJobShouldSwallowProviderLinkageError() throws Exception {
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(new Configuration(), null, null, null);
+
+        JobID jobId = JobID.generate();
+        delegationTokenManager.registerJob(jobId, new Configuration());
+
+        // A LinkageError from provider plugin code during unregistration must get the same
+        // treatment as an exception: logged and swallowed, so it neither aborts the cleanup of
+        // the remaining providers nor escapes onto the caller's thread.
+        ExceptionThrowingDelegationTokenProvider.throwErrorInUnregister.set(true);
+        assertDoesNotThrow(() -> delegationTokenManager.unregisterJob(jobId));
+    }
+
+    @Test
+    public void reobtainShouldCoalesceConcurrentRequests() throws Exception {
+        final ManuallyTriggeredScheduledExecutor scheduledExecutor =
+                new ManuallyTriggeredScheduledExecutor();
+        final ManuallyTriggeredScheduledExecutorService scheduler =
+                new ManuallyTriggeredScheduledExecutorService();
+
+        AtomicInteger startTokensUpdateCallCount = new AtomicInteger(0);
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(
+                        hermeticCooldownConfig(Duration.ofMillis(60_000)),
+                        null,
+                        scheduledExecutor,
+                        scheduler) {
+                    @Override
+                    void startTokensUpdate() {
+                        startTokensUpdateCallCount.incrementAndGet();
+                        super.startTokensUpdate();
+                    }
+                };
+        delegationTokenManager.start(tokens -> {});
+        // Only count the cycle serving the coalesced requests, not start()'s inline cycle.
+        startTokensUpdateCallCount.set(0);
+
+        // Two requests before the cycle runs must be coalesced into a single scheduled obtain.
+        delegationTokenManager.reobtainDelegationTokens();
+        delegationTokenManager.reobtainDelegationTokens();
+        assertEquals(1, scheduledExecutor.getActiveScheduledTasks().size());
+        // The second request must be a true no-op: it must not cancel and reschedule a new future
+        // (which would also leave a single *active* task). getAllScheduledTasks() includes
+        // cancelled futures, so it stays 1 only if the second request was genuinely coalesced.
+        assertEquals(1, scheduledExecutor.getAllScheduledTasks().size());
+
+        scheduledExecutor.triggerScheduledTasks();
+        scheduler.triggerAll();
+        assertEquals(1, startTokensUpdateCallCount.get());
+    }
+
+    @Test
+    public void periodicRenewalMustNotCancelPendingOnDemandReobtain() throws Exception {
+        final ManuallyTriggeredScheduledExecutor scheduledExecutor =
+                new ManuallyTriggeredScheduledExecutor();
+        final ManuallyTriggeredScheduledExecutorService scheduler =
+                new ManuallyTriggeredScheduledExecutorService();
+
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(
+                        hermeticCooldownConfig(Duration.ofMillis(60_000)),
+                        null,
+                        scheduledExecutor,
+                        scheduler);
+        delegationTokenManager.start(tokens -> {});
+
+        // An on-demand re-obtain is scheduled (e.g. a freshly registered job).
+        delegationTokenManager.reobtainDelegationTokens();
+        assertEquals(1, scheduledExecutor.getAllScheduledTasks().size());
+        assertEquals(0L, onlyScheduledDelayMillis(scheduledExecutor));
+
+        // A periodic obtain cycle that was already running completes and tries to install its own
+        // renewal. It must NOT cancel the pending on-demand re-obtain (regression test for the
+        // lost-reobtain race that also latched the dedupe flag).
+        delegationTokenManager.maybeScheduleRenewal(999_999L);
+
+        // No cancel+reschedule happened (still a single schedule call) and the pending future is
+        // still the immediate on-demand one, not the 999_999ms periodic renewal.
+        assertEquals(1, scheduledExecutor.getAllScheduledTasks().size());
+        assertEquals(0L, onlyScheduledDelayMillis(scheduledExecutor));
+
+        // Once the on-demand cycle has run and cleared the dedupe flag, a periodic renewal can be
+        // scheduled normally again.
+        scheduledExecutor.triggerScheduledTasks();
+        scheduler.triggerAll();
+        delegationTokenManager.maybeScheduleRenewal(123L);
+        assertEquals(123L, onlyScheduledDelayMillis(scheduledExecutor));
+    }
+
+    @Test
+    public void reobtainShouldRunImmediatelyAfterCooldownWindowElapses() throws Exception {
+        final ManuallyTriggeredScheduledExecutor scheduledExecutor =
+                new ManuallyTriggeredScheduledExecutor();
+        final ManuallyTriggeredScheduledExecutorService scheduler =
+                new ManuallyTriggeredScheduledExecutorService();
+
+        Configuration configuration = hermeticCooldownConfig(Duration.ofMillis(60_000));
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(
+                        configuration, null, scheduledExecutor, scheduler);
+
+        long t0 = 1_000_000L;
+        delegationTokenManager.setClock(Clock.fixed(ofEpochMilli(t0), ZoneId.systemDefault()));
+        delegationTokenManager.start(tokens -> {});
+        delegationTokenManager.reobtainDelegationTokens();
+        assertEquals(0L, onlyScheduledDelayMillis(scheduledExecutor));
+        scheduledExecutor.triggerScheduledTasks();
+        scheduler.triggerAll();
+
+        // A request arriving after the full cooldown window has elapsed runs immediately again.
+        delegationTokenManager.setClock(
+                Clock.fixed(ofEpochMilli(t0 + 70_000L), ZoneId.systemDefault()));
+        delegationTokenManager.reobtainDelegationTokens();
+        assertEquals(0L, onlyScheduledDelayMillis(scheduledExecutor));
+    }
+
+    @Test
+    public void stopShouldResetCooldownForSubsequentStart() throws Exception {
+        final ManuallyTriggeredScheduledExecutor scheduledExecutor =
+                new ManuallyTriggeredScheduledExecutor();
+        final ManuallyTriggeredScheduledExecutorService scheduler =
+                new ManuallyTriggeredScheduledExecutorService();
+
+        Configuration configuration = hermeticCooldownConfig(Duration.ofMillis(60_000));
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(
+                        configuration, null, scheduledExecutor, scheduler);
+
+        long t0 = 1_000_000L;
+        delegationTokenManager.setClock(Clock.fixed(ofEpochMilli(t0), ZoneId.systemDefault()));
+        delegationTokenManager.start(tokens -> {});
+        delegationTokenManager.reobtainDelegationTokens();
+        assertEquals(0L, onlyScheduledDelayMillis(scheduledExecutor));
+        scheduledExecutor.triggerScheduledTasks();
+        scheduler.triggerAll();
+
+        // 10s later a re-obtain is deferred by the cooldown.
+        delegationTokenManager.setClock(
+                Clock.fixed(ofEpochMilli(t0 + 10_000L), ZoneId.systemDefault()));
+        delegationTokenManager.reobtainDelegationTokens();
+        assertEquals(50_000L, onlyScheduledDelayMillis(scheduledExecutor));
+
+        // stop() clears the cooldown anchor (and the dedupe/stopped state). After a restart, the
+        // next re-obtain runs immediately instead of inheriting the stale cooldown.
+        delegationTokenManager.stop();
+        delegationTokenManager.start(tokens -> {});
+        delegationTokenManager.setClock(
+                Clock.fixed(ofEpochMilli(t0 + 15_000L), ZoneId.systemDefault()));
+        delegationTokenManager.reobtainDelegationTokens();
+        assertEquals(0L, onlyScheduledDelayMillis(scheduledExecutor));
+    }
+
+    @Test
+    public void reobtainShouldRespectCooldown() throws Exception {
+        final ManuallyTriggeredScheduledExecutor scheduledExecutor =
+                new ManuallyTriggeredScheduledExecutor();
+        final ManuallyTriggeredScheduledExecutorService scheduler =
+                new ManuallyTriggeredScheduledExecutorService();
+
+        Configuration configuration = hermeticCooldownConfig(Duration.ofMillis(60_000));
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(
+                        configuration, null, scheduledExecutor, scheduler);
+
+        long t0 = 1_000_000L;
+        delegationTokenManager.setClock(Clock.fixed(ofEpochMilli(t0), ZoneId.systemDefault()));
+
+        delegationTokenManager.start(tokens -> {});
+
+        // First re-obtain after a quiet period runs immediately (no cooldown applies).
+        delegationTokenManager.reobtainDelegationTokens();
+        assertEquals(0L, onlyScheduledDelayMillis(scheduledExecutor));
+        scheduledExecutor.triggerScheduledTasks();
+        scheduler.triggerAll();
+
+        // A second re-obtain 10s later must be deferred until the 60s cooldown elapses.
+        delegationTokenManager.setClock(
+                Clock.fixed(ofEpochMilli(t0 + 10_000L), ZoneId.systemDefault()));
+        delegationTokenManager.reobtainDelegationTokens();
+        assertEquals(50_000L, onlyScheduledDelayMillis(scheduledExecutor));
+    }
+
+    @Test
+    public void reobtainShouldBeIgnoredWhenNotStarted() {
+        // Constructed with null executors, so never started. A re-obtain request must be a safe
+        // no-op.
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(new Configuration(), null, null, null);
+
+        assertDoesNotThrow(delegationTokenManager::reobtainDelegationTokens);
+    }
+
+    @Test
+    public void reobtainBeforeStartMustNotScheduleObtainCycle() {
+        final ManuallyTriggeredScheduledExecutor scheduledExecutor =
+                new ManuallyTriggeredScheduledExecutor();
+        final ManuallyTriggeredScheduledExecutorService scheduler =
+                new ManuallyTriggeredScheduledExecutorService();
+
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(
+                        hermeticCooldownConfig(Duration.ofMillis(60_000)),
+                        null,
+                        scheduledExecutor,
+                        scheduler);
+
+        // Providers receive the re-obtain callback already in the constructor (init), so a
+        // provider can invoke it before start(). The manager has no listener yet, so the
+        // request must be rejected instead of dispatching an obtain cycle that can only fail
+        // on the null listener and keep rescheduling itself through the retry path.
+        delegationTokenManager.reobtainDelegationTokens();
+
+        assertEquals(
+                0,
+                scheduledExecutor.getActiveScheduledTasks().size(),
+                "A re-obtain before start() must not schedule an obtain cycle");
+    }
+
+    @Test
+    public void schedulerFailureMustNotWedgeSubsequentReobtains() throws Exception {
+        final ManuallyTriggeredScheduledExecutor delegate =
+                new ManuallyTriggeredScheduledExecutor();
+        final ManuallyTriggeredScheduledExecutorService scheduler =
+                new ManuallyTriggeredScheduledExecutorService();
+
+        // Throws a plain RuntimeException (not a RejectedExecutionException) on the next
+        // schedule() call when the flag is set, then behaves normally again.
+        final AtomicBoolean throwNext = new AtomicBoolean(false);
+        ScheduledExecutor throwOnce =
+                new ScheduledExecutor() {
+                    @Override
+                    public ScheduledFuture<?> schedule(
+                            Runnable command, long delay, TimeUnit unit) {
+                        if (throwNext.compareAndSet(true, false)) {
+                            throw new RuntimeException("simulated scheduler failure");
+                        }
+                        return delegate.schedule(command, delay, unit);
+                    }
+
+                    @Override
+                    public <V> ScheduledFuture<V> schedule(
+                            Callable<V> callable, long delay, TimeUnit unit) {
+                        return delegate.schedule(callable, delay, unit);
+                    }
+
+                    @Override
+                    public ScheduledFuture<?> scheduleAtFixedRate(
+                            Runnable command, long initialDelay, long period, TimeUnit unit) {
+                        return delegate.scheduleAtFixedRate(command, initialDelay, period, unit);
+                    }
+
+                    @Override
+                    public ScheduledFuture<?> scheduleWithFixedDelay(
+                            Runnable command, long initialDelay, long delay, TimeUnit unit) {
+                        return delegate.scheduleWithFixedDelay(command, initialDelay, delay, unit);
+                    }
+
+                    @Override
+                    public void execute(Runnable command) {
+                        delegate.execute(command);
+                    }
+                };
+
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(
+                        hermeticCooldownConfig(Duration.ZERO), null, throwOnce, scheduler);
+        delegationTokenManager.start(tokens -> {});
+
+        // The first re-obtain hits a scheduler that blows up with something other than the
+        // handled RejectedExecutionException. The failure propagates to the caller.
+        throwNext.set(true);
+        assertThrows(RuntimeException.class, delegationTokenManager::reobtainDelegationTokens);
+
+        // The scheduler is healthy again. The next re-obtain must schedule a fresh obtain
+        // cycle instead of being coalesced against the cycle that never got scheduled.
+        delegationTokenManager.reobtainDelegationTokens();
+        assertEquals(
+                1,
+                delegate.getActiveScheduledTasks().size(),
+                "A re-obtain after a scheduler failure must schedule a fresh obtain cycle");
+    }
+
+    @Disabled(
+            "Pending PR #28639 review discussion: whether provider.stop() should run per"
+                    + " leadership session (current behavior, see stopShouldStopProviders) or only"
+                    + " at process shutdown. Enable and drop stopShouldStopProviders if the latter"
+                    + " is chosen.")
+    @Test
+    public void stopShouldKeepProvidersUsableForSubsequentStart() throws Exception {
+        final ManuallyTriggeredScheduledExecutor scheduledExecutor =
+                new ManuallyTriggeredScheduledExecutor();
+        final ManuallyTriggeredScheduledExecutorService scheduler =
+                new ManuallyTriggeredScheduledExecutorService();
+
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(
+                        new Configuration(), null, scheduledExecutor, scheduler);
+
+        // The manager is a process-lifetime singleton reused across ResourceManager leadership
+        // sessions: stop() runs on every leadership revoke and start() on the next grant, with
+        // the same provider instances. Providers are init()-ed exactly once, in the manager
+        // constructor, and the SPI has no re-init hook, so a provider closed by stop() stays
+        // broken for every following term. Providers must therefore only be closed at genuine
+        // process shutdown, not by the per-session stop().
+        delegationTokenManager.start(tokens -> {});
+        delegationTokenManager.stop();
+        delegationTokenManager.start(tokens -> {});
+
+        assertFalse(
+                ExceptionThrowingDelegationTokenProvider.stopped.get(),
+                "A leadership-session stop() must not close the providers, the next start()"
+                        + " re-uses them");
+    }
+
+    @Test
+    public void startShouldBeIdempotent() throws Exception {
+        final ManuallyTriggeredScheduledExecutor scheduledExecutor =
+                new ManuallyTriggeredScheduledExecutor();
+        final ManuallyTriggeredScheduledExecutorService scheduler =
+                new ManuallyTriggeredScheduledExecutorService();
+
+        // The throw provider produces tokens so the listener gets notified on every cycle.
+        ExceptionThrowingDelegationTokenProvider.addToken.set(true);
+        Configuration configuration = new Configuration();
+        configuration.set(getBooleanConfigOption(CONFIG_PREFIX + ".throw.enabled"), true);
+        configuration.set(getBooleanConfigOption(CONFIG_PREFIX + ".hadoopfs.enabled"), false);
+        configuration.set(getBooleanConfigOption(CONFIG_PREFIX + ".hbase.enabled"), false);
+
+        AtomicInteger startTokensUpdateCallCount = new AtomicInteger(0);
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(
+                        configuration, null, scheduledExecutor, scheduler) {
+                    @Override
+                    void startTokensUpdate() {
+                        startTokensUpdateCallCount.incrementAndGet();
+                        super.startTokensUpdate();
+                    }
+                };
+
+        AtomicInteger firstListenerNotifications = new AtomicInteger(0);
+        AtomicInteger secondListenerNotifications = new AtomicInteger(0);
+        delegationTokenManager.start(tokens -> firstListenerNotifications.incrementAndGet());
+        // A redundant start() (e.g. a buggy caller) must be ignored: no second inline obtain
+        // cycle, and the listener of the running manager must not be swapped.
+        delegationTokenManager.start(tokens -> secondListenerNotifications.incrementAndGet());
+
+        assertEquals(
+                1,
+                startTokensUpdateCallCount.get(),
+                "A redundant start() must not run another obtain cycle");
+        assertEquals(
+                1,
+                firstListenerNotifications.get(),
+                "The first start()'s inline cycle must notify the listener once");
+
+        // A later cycle must still notify the original listener, not the ignored one.
+        delegationTokenManager.reobtainDelegationTokens();
+        scheduledExecutor.triggerScheduledTasks();
+        scheduler.triggerAll();
+        assertEquals(
+                2,
+                firstListenerNotifications.get(),
+                "The original listener must keep receiving tokens");
+        assertEquals(
+                0,
+                secondListenerNotifications.get(),
+                "The listener from the ignored start() must never receive tokens");
+    }
+
+    @Test
+    public void retryMustBringPendingOnDemandReobtainForward() throws Exception {
+        final ManuallyTriggeredScheduledExecutor scheduledExecutor =
+                new ManuallyTriggeredScheduledExecutor();
+        final ManuallyTriggeredScheduledExecutorService scheduler =
+                new ManuallyTriggeredScheduledExecutorService();
+
+        Configuration configuration = hermeticCooldownConfig(Duration.ofMillis(60_000));
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(
+                        configuration, null, scheduledExecutor, scheduler);
+
+        long t0 = 1_000_000L;
+        delegationTokenManager.setClock(Clock.fixed(ofEpochMilli(t0), ZoneId.systemDefault()));
+        delegationTokenManager.start(tokens -> {});
+
+        delegationTokenManager.reobtainDelegationTokens();
+        scheduledExecutor.triggerScheduledTasks();
+        scheduler.triggerAll();
+
+        // 10s later a second re-obtain is cooldown-deferred by 50s.
+        delegationTokenManager.setClock(
+                Clock.fixed(ofEpochMilli(t0 + 10_000L), ZoneId.systemDefault()));
+        delegationTokenManager.reobtainDelegationTokens();
+        assertEquals(50_000L, onlyScheduledDelayMillis(scheduledExecutor));
+
+        // A failed cycle now wants a retry in 10s. The pending on-demand cycle must be brought
+        // forward to the sooner time instead of silently swallowing the retry, otherwise the
+        // effective retry would fire 50s out while the backoff (and its token-TTL cap) asked
+        // for 10s.
+        delegationTokenManager.maybeScheduleRenewal(10_000L);
+        assertEquals(
+                10_000L,
+                onlyScheduledDelayMillis(scheduledExecutor),
+                "A sooner retry must bring the pending on-demand cycle forward");
+    }
+
+    @Test
+    public void registerJobShouldBeIdempotent() throws Exception {
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(new Configuration(), null, null, null);
+
+        // Re-registering the same job (e.g. on JobManager/ResourceManager failover) must not
+        // accumulate duplicate per-job state in the providers.
+        JobID jobId = JobID.generate();
+        delegationTokenManager.registerJob(jobId, new Configuration());
+        delegationTokenManager.registerJob(jobId, new Configuration());
+
+        assertEquals(1, ExceptionThrowingDelegationTokenProvider.registeredJobs.get().size());
+    }
+
+    @Test
+    public void obtainLockSerializesConcurrentObtainCycles() throws Exception {
+        final ManuallyTriggeredScheduledExecutor scheduledExecutor =
+                new ManuallyTriggeredScheduledExecutor();
+        final ExecutorService ioExecutor = Executors.newFixedThreadPool(2);
+        try {
+            // The barrier trips only if two obtain cycles are inside the obtain/broadcast
+            // section at the same time. obtainLock must serialize them, so each should time out.
+            final CyclicBarrier barrier = new CyclicBarrier(2);
+            final AtomicBoolean concurrentObtainDetected = new AtomicBoolean(false);
+            final CountDownLatch done = new CountDownLatch(2);
+            // Enabled only after start(): its inline first cycle must not wait at (and, by
+            // timing out, break) the barrier meant for the two concurrent cycles below.
+            final AtomicBoolean barrierEnabled = new AtomicBoolean(false);
+
+            DefaultDelegationTokenManager delegationTokenManager =
+                    new DefaultDelegationTokenManager(
+                            new Configuration(), null, scheduledExecutor, ioExecutor) {
+                        @Override
+                        protected Optional<Long> obtainDelegationTokensAndGetNextRenewal(
+                                DelegationTokenContainer container) {
+                            if (!barrierEnabled.get()) {
+                                return Optional.empty();
+                            }
+                            try {
+                                barrier.await(200, TimeUnit.MILLISECONDS);
+                                // Reached only if both cycles met here concurrently.
+                                concurrentObtainDetected.set(true);
+                            } catch (TimeoutException | BrokenBarrierException serialized) {
+                                // Expected: the other cycle never entered within the window.
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                            return Optional.empty();
+                        }
+                    };
+
+            delegationTokenManager.start(tokens -> {});
+            barrierEnabled.set(true);
+
+            ioExecutor.execute(
+                    () -> {
+                        delegationTokenManager.startTokensUpdate();
+                        done.countDown();
+                    });
+            ioExecutor.execute(
+                    () -> {
+                        delegationTokenManager.startTokensUpdate();
+                        done.countDown();
+                    });
+
+            assertTrue(done.await(10, TimeUnit.SECONDS));
+            assertFalse(
+                    concurrentObtainDetected.get(),
+                    "obtainLock must prevent two obtain cycles from running concurrently");
+        } finally {
+            ioExecutor.shutdownNow();
+        }
+    }
+
+    /**
+     * Configuration for cooldown-scheduling tests: sets the cooldown and disables all providers
+     * that could fail the obtain cycle (hadoopfs/hbase need a real Hadoop setup, and the throw
+     * provider fails on demand). A failed cycle schedules a jittered retry, and the bring-forward
+     * clamp would coalesce the on-demand request into that retry instead of deferring by the
+     * cooldown, making delay assertions nondeterministic.
+     */
+    private static Configuration hermeticCooldownConfig(Duration cooldown) {
+        Configuration configuration = new Configuration();
+        configuration.set(DELEGATION_TOKENS_REOBTAIN_COOLDOWN, cooldown);
+        configuration.set(getBooleanConfigOption(CONFIG_PREFIX + ".throw.enabled"), false);
+        configuration.set(getBooleanConfigOption(CONFIG_PREFIX + ".hadoopfs.enabled"), false);
+        configuration.set(getBooleanConfigOption(CONFIG_PREFIX + ".hbase.enabled"), false);
+        return configuration;
+    }
+
+    private static long onlyScheduledDelayMillis(
+            ManuallyTriggeredScheduledExecutor scheduledExecutor) {
+        Collection<ScheduledFuture<?>> tasks = scheduledExecutor.getActiveScheduledTasks();
+        assertEquals(1, tasks.size());
+        return tasks.iterator().next().getDelay(TimeUnit.MILLISECONDS);
     }
 }
