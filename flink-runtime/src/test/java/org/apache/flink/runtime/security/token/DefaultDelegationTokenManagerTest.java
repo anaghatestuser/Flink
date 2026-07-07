@@ -392,6 +392,26 @@ public class DefaultDelegationTokenManagerTest {
     }
 
     @Test
+    public void registerJobFailureWithLinkageErrorMustRollBackProviders() {
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(new Configuration(), null, null, null);
+
+        // A LinkageError from provider plugin code (e.g. a NoClassDefFoundError, the same failure
+        // class loadProviders special-cases at init) must get the same treatment as an exception:
+        // roll the registration back on all providers, log, and rethrow.
+        ExceptionThrowingDelegationTokenProvider.throwErrorInRegister.set(true);
+        JobID jobId = JobID.generate();
+
+        assertThrows(
+                NoClassDefFoundError.class,
+                () -> delegationTokenManager.registerJob(jobId, new Configuration()));
+        assertTrue(
+                ExceptionThrowingDelegationTokenProvider.registeredJobs.get().isEmpty(),
+                "A registration that failed with a LinkageError must be rolled back on all"
+                        + " providers");
+    }
+
+    @Test
     public void unregisterJobShouldSwallowProviderFailure() throws Exception {
         Configuration configuration = new Configuration();
         DefaultDelegationTokenManager delegationTokenManager =
@@ -402,6 +422,21 @@ public class DefaultDelegationTokenManagerTest {
 
         // A provider that throws during unregistration must not prevent cleanup from completing.
         ExceptionThrowingDelegationTokenProvider.throwInUnregister.set(true);
+        assertDoesNotThrow(() -> delegationTokenManager.unregisterJob(jobId));
+    }
+
+    @Test
+    public void unregisterJobShouldSwallowProviderLinkageError() throws Exception {
+        DefaultDelegationTokenManager delegationTokenManager =
+                new DefaultDelegationTokenManager(new Configuration(), null, null, null);
+
+        JobID jobId = JobID.generate();
+        delegationTokenManager.registerJob(jobId, new Configuration());
+
+        // A LinkageError from provider plugin code during unregistration must get the same
+        // treatment as an exception: logged and swallowed, so it neither aborts the cleanup of
+        // the remaining providers nor escapes onto the caller's thread.
+        ExceptionThrowingDelegationTokenProvider.throwErrorInUnregister.set(true);
         assertDoesNotThrow(() -> delegationTokenManager.unregisterJob(jobId));
     }
 

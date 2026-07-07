@@ -663,14 +663,17 @@ public class DefaultDelegationTokenManager implements DelegationTokenManager {
             for (DelegationTokenProvider provider : delegationTokenProviders.values()) {
                 provider.registerJob(jobId, jobConfiguration);
             }
-        } catch (Exception e) {
+        } catch (Exception | LinkageError e) {
             // If any of the providers fail to register, then unregister the job from them all.
             // unregisterJob is idempotent, so it is safe to call it for providers that were never
             // (or only partially) registered for this job before the failure. The rollback must
-            // never mask the original failure, so swallow any rollback exception.
+            // never mask the original failure, so swallow any rollback exception. LinkageError is
+            // included because provider plugin code can fail class resolution (the same failure
+            // class loadProviders special-cases), and such a failure must not skip this log and
+            // rollback.
             try {
                 unregisterJob(jobId);
-            } catch (Exception rollbackException) {
+            } catch (Exception | LinkageError rollbackException) {
                 LOG.error("Failed to roll back registration of job {}", jobId, rollbackException);
             }
             LOG.error("Failed to register job {}", jobId, e);
@@ -683,7 +686,7 @@ public class DefaultDelegationTokenManager implements DelegationTokenManager {
         for (DelegationTokenProvider provider : delegationTokenProviders.values()) {
             try {
                 provider.unregisterJob(jobId);
-            } catch (Exception e) {
+            } catch (Exception | LinkageError e) {
                 LOG.error("Failed to unregister job for provider {}", provider.serviceName(), e);
             }
         }
