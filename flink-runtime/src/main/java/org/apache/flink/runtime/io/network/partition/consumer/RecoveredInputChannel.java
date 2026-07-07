@@ -59,7 +59,7 @@ public abstract class RecoveredInputChannel extends InputChannel implements Chan
     private static final Logger LOG = LoggerFactory.getLogger(RecoveredInputChannel.class);
 
     private final ArrayDeque<Buffer> receivedBuffers = new ArrayDeque<>();
-    private final CompletableFuture<?> stateConsumedFuture = new CompletableFuture<>();
+    private final CompletableFuture<Void> stateConsumedFuture = new CompletableFuture<>();
     protected final BufferManager bufferManager;
 
     /**
@@ -105,7 +105,7 @@ public abstract class RecoveredInputChannel extends InputChannel implements Chan
                 numBytesIn,
                 numBuffersIn);
 
-        bufferManager = new BufferManager(inputGate.getMemorySegmentProvider(), this, 0);
+        bufferManager = new BufferManager(inputGate.getMemorySegmentProvider(), this, 0, true);
         this.networkBuffersPerChannel = networkBuffersPerChannel;
     }
 
@@ -115,23 +115,49 @@ public abstract class RecoveredInputChannel extends InputChannel implements Chan
         this.channelStateWriter = checkNotNull(channelStateWriter);
     }
 
-    public final InputChannel toInputChannel() throws IOException {
-        Preconditions.checkState(
-                bufferFilteringCompleteFuture.isDone(), "buffer filtering is not complete");
-        if (!inputGate.isCheckpointingDuringRecoveryEnabled()) {
-            Preconditions.checkState(
-                    stateConsumedFuture.isDone(), "recovered state is not fully consumed");
+    public final InputChannel toInputChannel(boolean needsRecovery) throws IOException {
+        if (needsRecovery) {
+            return toInputChannelInRecovery();
+        }
+        synchronized (receivedBuffers) {
+            Preconditions.checkState(receivedBuffers.isEmpty(), "Received buffer should be empty.");
         }
 
-        // Extract remaining buffers before conversion.
-        // These buffers have been filtered but not yet consumed by the Task.
+        final InputChannel inputChannel = toInputChannelInternal(needsRecovery);
+        inputChannel.setup();
+        inputChannel.checkpointStopped(lastStoppedCheckpointId);
+        return inputChannel;
+    }
+
+    /**
+     * FLINK-38544 transitional: removed when the spilling backend lands. Creates the physical
+     * channel in recovery state and synchronously hands every queued recovered buffer over through
+     * the push interface. The legacy {@link EndOfInputChannelStateEvent} in the queue is dropped in
+     * translation; the {@link EndOfFetchedChannelStateEvent} sentinel takes its place. The sentinel
+     * is appended directly instead of via {@link
+     * RecoverableInputChannel#finishRecoveredBufferDelivery()} because that method waits for
+     * upstream readiness, which cannot happen while the mailbox thread is still converting channels
+     * (partitions are requested only after conversion).
+     */
+    private InputChannel toInputChannelInRecovery() throws IOException {
         final ArrayDeque<Buffer> remainingBuffers;
         synchronized (receivedBuffers) {
             remainingBuffers = new ArrayDeque<>(receivedBuffers);
             receivedBuffers.clear();
         }
 
-        final InputChannel inputChannel = toInputChannelInternal(remainingBuffers);
+        final InputChannel inputChannel = toInputChannelInternal(true);
+        inputChannel.setup();
+        final RecoverableInputChannel recoverableChannel = (RecoverableInputChannel) inputChannel;
+        for (Buffer buffer : remainingBuffers) {
+            if (isEndOfInputChannelStateEvent(buffer)) {
+                buffer.recycleBuffer();
+            } else {
+                recoverableChannel.onRecoveredStateBuffer(buffer);
+            }
+        }
+        recoverableChannel.onRecoveredStateBuffer(
+                EventSerializer.toBuffer(EndOfFetchedChannelStateEvent.INSTANCE, false));
         inputChannel.checkpointStopped(lastStoppedCheckpointId);
         return inputChannel;
     }
@@ -142,13 +168,10 @@ public abstract class RecoveredInputChannel extends InputChannel implements Chan
     }
 
     /**
-     * Creates the physical InputChannel from this recovered channel.
-     *
-     * @param remainingBuffers buffers that have been filtered but not yet consumed by the Task.
-     *     These buffers will be migrated to the new physical channel.
-     * @return the physical InputChannel (LocalInputChannel or RemoteInputChannel)
+     * Creates the physical {@link InputChannel}; {@code needsRecovery} controls whether it starts
+     * in recovery.
      */
-    protected abstract InputChannel toInputChannelInternal(ArrayDeque<Buffer> remainingBuffers)
+    protected abstract InputChannel toInputChannelInternal(boolean needsRecovery)
             throws IOException;
 
     /**
@@ -159,17 +182,15 @@ public abstract class RecoveredInputChannel extends InputChannel implements Chan
         return bufferFilteringCompleteFuture;
     }
 
-    CompletableFuture<?> getStateConsumedFuture() {
+    @Override
+    public CompletableFuture<Void> getStateConsumedFuture() {
         return stateConsumedFuture;
     }
 
     public void onRecoveredStateBuffer(Buffer buffer) {
         boolean recycleBuffer = true;
         NetworkActionsLogger.traceRecover(
-                "InputChannelRecoveredStateHandler#recover",
-                buffer,
-                inputGate.getOwningTaskName(),
-                channelInfo);
+                "NoSpillingHandler#recover", buffer, inputGate.getOwningTaskName(), channelInfo);
         try {
             final boolean wasEmpty;
             synchronized (receivedBuffers) {
@@ -307,7 +328,7 @@ public abstract class RecoveredInputChannel extends InputChannel implements Chan
         }
     }
 
-    void releaseAllResources() throws IOException {
+    public void releaseAllResources() throws IOException {
         ArrayDeque<Buffer> releasedBuffers = new ArrayDeque<>();
         boolean shouldRelease = false;
 
