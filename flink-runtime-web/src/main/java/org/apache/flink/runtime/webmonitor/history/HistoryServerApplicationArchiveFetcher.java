@@ -88,7 +88,9 @@ public class HistoryServerApplicationArchiveFetcher<Entry>
             ArchiveStorage<Entry> archiveStorage,
             Map<String, ArchiveMetaInfo> archiveMetaInfoCache,
             Map<String, ArchiveMetaInfo> applicationArchiveMetaInfoCache,
-            int lazyFetchExecutorCommonPoolSize) {
+            int lazyFetchExecutorCommonPoolSize,
+            int lazyFetchExecutorIndividualPoolSize)
+            throws IOException {
         super(
                 refreshDirs,
                 webDir,
@@ -97,7 +99,8 @@ public class HistoryServerApplicationArchiveFetcher<Entry>
                 retainedStrategy,
                 archiveStorage,
                 archiveMetaInfoCache,
-                lazyFetchExecutorCommonPoolSize);
+                lazyFetchExecutorCommonPoolSize,
+                lazyFetchExecutorIndividualPoolSize);
 
         this.applicationArchiveMetaInfoCache = applicationArchiveMetaInfoCache;
         for (HistoryServer.RefreshLocation refreshDir : refreshDirs) {
@@ -185,7 +188,7 @@ public class HistoryServerApplicationArchiveFetcher<Entry>
                     .add(jobId);
             ArchiveEvent processArchiveEvents =
                     LAZY.equals(archiveLoadMode)
-                            ? lazyProcessJobArchive(jobId, jobArchive.getPath())
+                            ? lazyProcessJobArchive(jobId, jobArchive.getPath(), false)
                             : processJobArchive(jobId, jobArchive.getPath());
             events.add(processArchiveEvents);
         }
@@ -315,7 +318,7 @@ public class HistoryServerApplicationArchiveFetcher<Entry>
         List<ArchiveEvent> events = new ArrayList<>();
         if (!applicationArchiveMetaInfoCache.containsKey(archiveId)) {
             applicationArchiveMetaInfoCache.put(
-                    archiveId, new ArchiveMetaInfo(archiveId, OVERVIEW_PARSING));
+                    archiveId, new ArchiveMetaInfo(archiveId, OVERVIEW_PARSING, archivePath));
         } else {
             events.add(
                     new ArchiveEvent(

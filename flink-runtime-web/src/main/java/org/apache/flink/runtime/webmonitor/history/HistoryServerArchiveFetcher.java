@@ -18,6 +18,7 @@
 
 package org.apache.flink.runtime.webmonitor.history;
 
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.configuration.HistoryServerOptions;
@@ -38,6 +39,8 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMap
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
 
 import java.io.File;
 import java.io.IOException;
@@ -133,7 +136,9 @@ public class HistoryServerArchiveFetcher<Entry> {
     /** Executor for loading archives. */
     private final ExecutorService commonFetchExecutor;
 
+    private final ExecutorService individualFetchExecutor;
     private final Map<String, Future<?>> commonFetchTasks;
+    private final Map<String, Future<?>> individualFetchTasks;
     private final Map<String, ArchiveMetaInfo> archiveMetaInfoCache;
 
     HistoryServerArchiveFetcher(
@@ -144,7 +149,9 @@ public class HistoryServerArchiveFetcher<Entry> {
             ArchiveRetainedStrategy retainedStrategy,
             ArchiveStorage<Entry> archiveStorage,
             Map<String, ArchiveMetaInfo> archiveMetaInfoCache,
-            int lazyFetchExecutorCommonPoolSize) {
+            int lazyFetchExecutorCommonPoolSize,
+            int lazyFetchExecutorIndividualPoolSize)
+            throws IOException {
         this.refreshDirs = checkNotNull(refreshDirs);
         this.archiveEventListener = archiveEventListener;
         this.processExpiredArchiveDeletion = cleanupExpiredArchives;
@@ -160,7 +167,12 @@ public class HistoryServerArchiveFetcher<Entry> {
                 Executors.newFixedThreadPool(
                         lazyFetchExecutorCommonPoolSize,
                         new ExecutorThreadFactory("HistoryServer-commonFetchExecutor"));
+        this.individualFetchExecutor =
+                Executors.newFixedThreadPool(
+                        lazyFetchExecutorIndividualPoolSize,
+                        new ExecutorThreadFactory("HistoryServer-individualFetchExecutor"));
         this.commonFetchTasks = new ConcurrentHashMap<>();
+        this.individualFetchTasks = new ConcurrentHashMap<>();
         updateJobOverview();
 
         if (LOG.isInfoEnabled()) {
@@ -171,6 +183,12 @@ public class HistoryServerArchiveFetcher<Entry> {
     }
 
     void fetchArchives(HistoryServerOptions.HistoryServerArchiveLoadMode archiveLoadMode) {
+        LOG.debug("Starting archive fetching.");
+        scanArchives(archiveLoadMode, true);
+    }
+
+    void scanArchives(
+            HistoryServerOptions.HistoryServerArchiveLoadMode archiveLoadMode, boolean fetch) {
         LOG.debug("Starting archive fetching.");
         try {
             List<ArchiveEvent> events = new ArrayList<>();
@@ -209,7 +227,9 @@ public class HistoryServerArchiveFetcher<Entry> {
                         continue;
                     }
 
-                    fetchArchive(refreshDir, archiveId, archivePath, archiveLoadMode, events);
+                    if (fetch) {
+                        fetchArchive(refreshDir, archiveId, archivePath, archiveLoadMode, events);
+                    }
                 }
             }
 
@@ -226,7 +246,7 @@ public class HistoryServerArchiveFetcher<Entry> {
                 updateOverview();
             }
             events.forEach(archiveEventListener);
-            LOG.debug("Finished archive fetching.");
+            LOG.debug("Finished archive scan.");
         } catch (Exception e) {
             LOG.error("Critical failure while fetching/processing archives.", e);
         }
@@ -508,14 +528,25 @@ public class HistoryServerArchiveFetcher<Entry> {
     // -------------------------------- Lazy Load ----------------------------------------
     List<ArchiveEvent> lazyProcessArchive(String archiveId, Path archivePath, Path refreshDir)
             throws Exception {
-        return Collections.singletonList(lazyProcessJobArchive(archiveId, archivePath));
+        return Collections.singletonList(lazyProcessJobArchive(archiveId, archivePath, false));
     }
 
-    ArchiveEvent lazyProcessJobArchive(String jobId, Path jobArchive) throws Exception {
+    ArchiveEvent lazyProcessJobArchive(String jobId, Path jobArchive, boolean individual)
+            throws Exception {
         if (!archiveMetaInfoCache.containsKey(jobId)) {
-            archiveMetaInfoCache.put(jobId, new ArchiveMetaInfo(jobId, PENDING));
+            archiveMetaInfoCache.put(jobId, new ArchiveMetaInfo(jobId, PENDING, jobArchive));
         } else {
             return new ArchiveEvent(jobId, archiveMetaInfoCache.get(jobId).getEventType());
+        }
+
+        ExecutorService fetchExecutor;
+        Map<String, Future<?>> fetchTasks;
+        if (individual) {
+            fetchExecutor = individualFetchExecutor;
+            fetchTasks = individualFetchTasks;
+        } else {
+            fetchExecutor = commonFetchExecutor;
+            fetchTasks = commonFetchTasks;
         }
 
         archiveMetaInfoCache.get(jobId).setEventType(ArchiveEventType.OVERVIEW_PARSING);
@@ -553,7 +584,7 @@ public class HistoryServerArchiveFetcher<Entry> {
 
         if (!detailArchives.isEmpty()) {
             Future<?> future =
-                    commonFetchExecutor.submit(
+                    fetchExecutor.submit(
                             () -> {
                                 try {
                                     archiveMetaInfoCache
@@ -580,12 +611,15 @@ public class HistoryServerArchiveFetcher<Entry> {
                                     archiveMetaInfoCache
                                             .get(jobId)
                                             .setEventType(ArchiveEventType.CREATED);
+                                    if (individual) {
+                                        updateOverview();
+                                    }
                                     LOG.debug("Async detail parsing for job {} finished.", jobId);
                                 } finally {
-                                    commonFetchTasks.remove(jobId);
+                                    fetchTasks.remove(jobId);
                                 }
                             });
-            commonFetchTasks.put(jobId, future);
+            fetchTasks.put(jobId, future);
         }
 
         ArchiveEventType archiveEventType =
@@ -594,10 +628,79 @@ public class HistoryServerArchiveFetcher<Entry> {
         return new ArchiveEvent(jobId, archiveEventType);
     }
 
+    void lazyFetchArchiveProactively(String jobId, @Nullable Path archivePath) throws Exception {
+        resetWhenTriggerLazyFetch(jobId);
+
+        if (archivePath != null) {
+            lazyProcessJobArchive(jobId, archivePath, true);
+            return;
+        }
+
+        for (HistoryServer.RefreshLocation refreshDir : refreshDirs) {
+            archivePath = new Path(refreshDir.getPath(), jobId);
+            if (refreshDir.getFs().exists(archivePath)) {
+                lazyProcessJobArchive(jobId, archivePath, true);
+            }
+        }
+    }
+
+    void cleanUpArchives(HistoryServerOptions.HistoryServerArchiveLoadMode archiveLoadMode) {
+        LOG.info("Starting archive cleanup.");
+        scanArchives(archiveLoadMode, false);
+    }
+
+    boolean needLazyLoadIndividually(String jobId) {
+        ArchiveMetaInfo archiveMetaInfo = archiveMetaInfoCache.get(jobId);
+        if (archiveMetaInfo == null) {
+            return true;
+        }
+
+        switch (archiveMetaInfo.getEventType()) {
+            case PENDING:
+            case OVERVIEW_PARSING:
+            case OVERVIEW_CREATED:
+                return commonFetchTasks.containsKey(jobId)
+                        && !individualFetchTasks.containsKey(jobId);
+            default:
+                return false;
+        }
+    }
+
     void cleanUpLazyFetchTask(String jobId) {
         Future<?> commonFetchTask = commonFetchTasks.get(jobId);
         if (commonFetchTask != null) {
             commonFetchTask.cancel(true);
+            commonFetchTasks.remove(jobId);
         }
+        Future<?> individualFetchTask = individualFetchTasks.get(jobId);
+        if (individualFetchTask != null) {
+            individualFetchTask.cancel(true);
+            individualFetchTasks.remove(jobId);
+        }
+    }
+
+    @VisibleForTesting
+    Future<?> getCommonFetchTask(String jobId) {
+        return commonFetchTasks.get(jobId);
+    }
+
+    void resetWhenTriggerLazyFetch(String jobId) {
+        archiveMetaInfoCache.remove(jobId);
+        cleanUpLazyFetchTask(jobId);
+    }
+
+    void waitLazyFetchArchiveFinished(String jobId) throws Exception {
+        Future<?> commonFetchTask = commonFetchTasks.get(jobId);
+        if (commonFetchTask != null) {
+            commonFetchTask.get();
+        }
+        Future<?> individualFetchTask = individualFetchTasks.get(jobId);
+        if (individualFetchTask != null) {
+            individualFetchTask.get();
+        }
+    }
+
+    ArchiveMetaInfo getArchiveMetaInfo(String jobId) {
+        return archiveMetaInfoCache.get(jobId);
     }
 }
