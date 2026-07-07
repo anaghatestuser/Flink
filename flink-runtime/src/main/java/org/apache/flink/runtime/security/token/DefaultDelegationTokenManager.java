@@ -659,8 +659,10 @@ public class DefaultDelegationTokenManager implements DelegationTokenManager {
 
     @Override
     public void registerJob(JobID jobId, Configuration jobConfiguration) throws Exception {
+        DelegationTokenProvider failedProvider = null;
         try {
             for (DelegationTokenProvider provider : delegationTokenProviders.values()) {
+                failedProvider = provider;
                 provider.registerJob(jobId, jobConfiguration);
             }
         } catch (Exception | LinkageError e) {
@@ -676,7 +678,11 @@ public class DefaultDelegationTokenManager implements DelegationTokenManager {
             } catch (Exception | LinkageError rollbackException) {
                 LOG.error("Failed to roll back registration of job {}", jobId, rollbackException);
             }
-            LOG.error("Failed to register job {}", jobId, e);
+            LOG.error(
+                    "Failed to register job {} for provider {}",
+                    jobId,
+                    failedProvider == null ? "<none>" : failedProvider.serviceName(),
+                    e);
             throw e;
         }
     }
@@ -687,7 +693,11 @@ public class DefaultDelegationTokenManager implements DelegationTokenManager {
             try {
                 provider.unregisterJob(jobId);
             } catch (Exception | LinkageError e) {
-                LOG.error("Failed to unregister job for provider {}", provider.serviceName(), e);
+                LOG.error(
+                        "Failed to unregister job {} for provider {}",
+                        jobId,
+                        provider.serviceName(),
+                        e);
             }
         }
     }
