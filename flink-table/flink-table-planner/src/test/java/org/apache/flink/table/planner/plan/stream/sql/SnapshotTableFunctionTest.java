@@ -19,6 +19,7 @@
 package org.apache.flink.table.planner.plan.stream.sql;
 
 import org.apache.flink.table.api.TableConfig;
+import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.planner.utils.TableTestBase;
 import org.apache.flink.table.planner.utils.TableTestUtil;
 
@@ -27,17 +28,17 @@ import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import static org.apache.flink.core.testutils.FlinkAssertions.anyCauseMatches;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Plan tests for the SNAPSHOT built-in process table function used by the LATERAL SNAPSHOT temporal
  * join (FLIP-579).
  *
- * <p>SNAPSHOT is a planner placeholder without a runtime implementation. These tests therefore only
- * verify that a call parses, that its named arguments pass type inference, and that it survives
- * logical optimization in both a plain {@code FROM} clause and a {@code LATERAL} context. Verifying
- * the optimized rel plan (rather than the exec plan) stops short of the runtime translation that a
- * future optimizer rule will provide by rewriting the call into a dedicated temporal-join operator.
+ * <p>These tests focus on the function surface: that a call parses, that its named arguments pass
+ * type inference, that PARTITION BY and the implicit system arguments are rejected, and that a
+ * {@code LATERAL} use is rewritten into the dedicated LATERAL SNAPSHOT join. End-to-end join
+ * translation and semantics are covered by {@code LateralSnapshotJoinTest}.
  */
 public class SnapshotTableFunctionTest extends TableTestBase {
 
@@ -65,60 +66,42 @@ public class SnapshotTableFunctionTest extends TableTestBase {
                                 + "  rate_time TIMESTAMP(3),"
                                 + "  WATERMARK FOR rate_time AS rate_time"
                                 + ") WITH ('connector' = 'values')");
-        // Sinks used by the execution tests below.
-        util.tableEnv()
-                .executeSql(
-                        "CREATE TABLE RatesSink ("
-                                + "  currency STRING,"
-                                + "  rate INT,"
-                                + "  rate_time TIMESTAMP(3)"
-                                + ") WITH ('connector' = 'blackhole')");
-        util.tableEnv()
-                .executeSql(
-                        "CREATE TABLE JoinSink ("
-                                + "  order_id INT,"
-                                + "  amount INT,"
-                                + "  rate INT"
-                                + ") WITH ('connector' = 'blackhole')");
-    }
-
-    @Test
-    void testFromContext() {
-        // SNAPSHOT used as a standalone table function with the full set of named arguments
-        util.verifyRelPlan(
-                "SELECT * FROM SNAPSHOT("
-                        + "input => TABLE Rates, "
-                        + "load_completed_condition => 'user_time', "
-                        + "load_completed_time => CAST(TIMESTAMP '2026-07-01 00:00:00.001' AS TIMESTAMP_LTZ(3)), "
-                        + "load_completed_idle_timeout => INTERVAL '10' SECOND, "
-                        + "state_ttl => INTERVAL '1' DAY)");
     }
 
     @Test
     void testLateralContext() {
-        // SNAPSHOT used in a LATERAL context
-        util.verifyRelPlan(
-                "SELECT o.order_id, o.amount, r.rate "
-                        + "FROM Orders AS o, LATERAL TABLE(SNAPSHOT(input => TABLE Rates)) AS r "
-                        + "WHERE o.currency = r.currency");
+        // SNAPSHOT used in a LATERAL context is rewritten into the dedicated LATERAL SNAPSHOT join.
+        // An explicit load_completed_time keeps the rewrite deterministic; we only assert that the
+        // dedicated join node appears rather than pinning the whole plan.
+        final String plan =
+                util.tableEnv()
+                        .explainSql(
+                                "SELECT o.order_id, o.amount, r.rate "
+                                        + "FROM Orders AS o, LATERAL TABLE(SNAPSHOT("
+                                        + "input => TABLE Rates, "
+                                        + "load_completed_condition => 'user_time', "
+                                        + "load_completed_time => CAST(TIMESTAMP '2026-07-01 00:00:00' AS TIMESTAMP_LTZ(3))"
+                                        + ")) AS r "
+                                        + "WHERE o.currency = r.currency");
+        assertThat(plan).contains("LateralSnapshotJoin");
     }
 
     @Test
     @Disabled(
-            "SNAPSHOT should disable the implicit system arguments (on_time, uid), but that is not "
-                    + "wired up yet. disableSystemArguments(true) is only legal for a PTF that is "
-                    + "rewritten by its own optimizer rule before reaching "
-                    + "StreamPhysicalProcessTableFunctionRule (which otherwise rejects it with "
-                    + "'Disabling system arguments is not supported for user-defined PTF').")
+            "SNAPSHOT sets disableSystemArguments(true), but that flag is currently not enforced. "
+                    + "Re-enable once FLINK-40079 is fixed.")
     void testSystemArgumentsNotAllowed() {
-        // SNAPSHOT must disable the implicit system arguments (e.g. `on_time`). Passing one must be
-        // rejected because the argument is not allowed.
+        // SNAPSHOT disables the implicit system arguments (e.g. `on_time`). Passing one in a
+        // LATERAL context must be rejected because the argument is not part of the function
+        // signature.
         assertThatThrownBy(
                         () ->
                                 util.verifyRelPlan(
-                                        "SELECT * FROM SNAPSHOT("
+                                        "SELECT o.order_id "
+                                                + "FROM Orders AS o, LATERAL TABLE(SNAPSHOT("
                                                 + "input => TABLE Rates, "
-                                                + "on_time => DESCRIPTOR(rate_time))"))
+                                                + "on_time => DESCRIPTOR(rate_time))) AS r "
+                                                + "WHERE o.currency = r.currency"))
                 .satisfies(anyCauseMatches("on_time"));
     }
 
@@ -136,36 +119,15 @@ public class SnapshotTableFunctionTest extends TableTestBase {
     }
 
     @Test
-    void testFromContextExecutionFails() {
-        // SNAPSHOT has no runtime implementation yet, so compiling the query into the job's
-        // transformations fails. A future optimizer rule is expected to rewrite the call before
-        // this stage.
-        assertThatThrownBy(
-                        () ->
-                                util.generateTransformations(
-                                        "INSERT INTO RatesSink "
-                                                + "SELECT * FROM SNAPSHOT(input => TABLE Rates)"))
+    void testFromContextRejectedOutsideLateral() {
+        // SNAPSHOT used outside a LATERAL context is not rewritten by the LATERAL SNAPSHOT rule.
+        // ForbidSnapshotOutsideLateralRule intercepts the surviving SNAPSHOT scan and rejects it
+        // with a clear message before it reaches the generic PTF translation.
+        assertThatThrownBy(() -> util.verifyRelPlan("SELECT * FROM SNAPSHOT(input => TABLE Rates)"))
                 .satisfies(
                         anyCauseMatches(
-                                "Could not find a runtime implementation for built-in function 'SNAPSHOT'. "
-                                        + "The planner should have provided an implementation."));
-    }
-
-    @Test
-    void testLateralContextExecutionFails() {
-        // SNAPSHOT has no runtime implementation yet, so compiling the query into the job's
-        // transformations fails. A future optimizer rule is expected to rewrite the call before
-        // this stage.
-        assertThatThrownBy(
-                        () ->
-                                util.generateTransformations(
-                                        "INSERT INTO JoinSink "
-                                                + "SELECT o.order_id, o.amount, r.rate "
-                                                + "FROM Orders AS o, LATERAL TABLE(SNAPSHOT(input => TABLE Rates)) AS r "
-                                                + "WHERE o.currency = r.currency"))
-                .satisfies(
-                        anyCauseMatches(
-                                "Could not find a runtime implementation for built-in function 'SNAPSHOT'. "
-                                        + "The planner should have provided an implementation."));
+                                ValidationException.class,
+                                "The SNAPSHOT function can only be used as the build side "
+                                        + "(right-hand side) of a LATERAL join"));
     }
 }
