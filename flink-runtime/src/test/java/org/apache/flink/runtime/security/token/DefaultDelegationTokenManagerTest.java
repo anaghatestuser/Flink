@@ -748,13 +748,17 @@ public class DefaultDelegationTokenManagerTest {
         final ManuallyTriggeredScheduledExecutorService scheduler =
                 new ManuallyTriggeredScheduledExecutorService();
 
+        // The throw provider produces tokens so the listener gets notified on every cycle.
+        ExceptionThrowingDelegationTokenProvider.addToken.set(true);
+        Configuration configuration = new Configuration();
+        configuration.set(getBooleanConfigOption(CONFIG_PREFIX + ".throw.enabled"), true);
+        configuration.set(getBooleanConfigOption(CONFIG_PREFIX + ".hadoopfs.enabled"), false);
+        configuration.set(getBooleanConfigOption(CONFIG_PREFIX + ".hbase.enabled"), false);
+
         AtomicInteger startTokensUpdateCallCount = new AtomicInteger(0);
         DefaultDelegationTokenManager delegationTokenManager =
                 new DefaultDelegationTokenManager(
-                        hermeticCooldownConfig(Duration.ofMillis(60_000)),
-                        null,
-                        scheduledExecutor,
-                        scheduler) {
+                        configuration, null, scheduledExecutor, scheduler) {
                     @Override
                     void startTokensUpdate() {
                         startTokensUpdateCallCount.incrementAndGet();
@@ -762,15 +766,34 @@ public class DefaultDelegationTokenManagerTest {
                     }
                 };
 
-        delegationTokenManager.start(tokens -> {});
+        AtomicInteger firstListenerNotifications = new AtomicInteger(0);
+        AtomicInteger secondListenerNotifications = new AtomicInteger(0);
+        delegationTokenManager.start(tokens -> firstListenerNotifications.incrementAndGet());
         // A redundant start() (e.g. a buggy caller) must be ignored: no second inline obtain
         // cycle, and the listener of the running manager must not be swapped.
-        delegationTokenManager.start(tokens -> {});
+        delegationTokenManager.start(tokens -> secondListenerNotifications.incrementAndGet());
 
         assertEquals(
                 1,
                 startTokensUpdateCallCount.get(),
                 "A redundant start() must not run another obtain cycle");
+        assertEquals(
+                1,
+                firstListenerNotifications.get(),
+                "The first start()'s inline cycle must notify the listener once");
+
+        // A later cycle must still notify the original listener, not the ignored one.
+        delegationTokenManager.reobtainDelegationTokens();
+        scheduledExecutor.triggerScheduledTasks();
+        scheduler.triggerAll();
+        assertEquals(
+                2,
+                firstListenerNotifications.get(),
+                "The original listener must keep receiving tokens");
+        assertEquals(
+                0,
+                secondListenerNotifications.get(),
+                "The listener from the ignored start() must never receive tokens");
     }
 
     @Test
@@ -835,6 +858,9 @@ public class DefaultDelegationTokenManagerTest {
             final CyclicBarrier barrier = new CyclicBarrier(2);
             final AtomicBoolean concurrentObtainDetected = new AtomicBoolean(false);
             final CountDownLatch done = new CountDownLatch(2);
+            // Enabled only after start(): its inline first cycle must not wait at (and, by
+            // timing out, break) the barrier meant for the two concurrent cycles below.
+            final AtomicBoolean barrierEnabled = new AtomicBoolean(false);
 
             DefaultDelegationTokenManager delegationTokenManager =
                     new DefaultDelegationTokenManager(
@@ -842,6 +868,9 @@ public class DefaultDelegationTokenManagerTest {
                         @Override
                         protected Optional<Long> obtainDelegationTokensAndGetNextRenewal(
                                 DelegationTokenContainer container) {
+                            if (!barrierEnabled.get()) {
+                                return Optional.empty();
+                            }
                             try {
                                 barrier.await(200, TimeUnit.MILLISECONDS);
                                 // Reached only if both cycles met here concurrently.
@@ -856,6 +885,7 @@ public class DefaultDelegationTokenManagerTest {
                     };
 
             delegationTokenManager.start(tokens -> {});
+            barrierEnabled.set(true);
 
             ioExecutor.execute(
                     () -> {

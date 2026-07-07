@@ -430,7 +430,14 @@ public class DefaultDelegationTokenManager implements DelegationTokenManager {
                 LOG.debug("Interrupted", e);
             } catch (Exception e) {
                 long delay = calculateRetryDelay(clock);
-                long effectiveDelay = maybeScheduleRenewal(delay);
+                long effectiveDelay;
+                try {
+                    effectiveDelay = maybeScheduleRenewal(delay);
+                } catch (Throwable schedulingFailure) {
+                    // The original failure was not logged yet, keep it attached.
+                    schedulingFailure.addSuppressed(e);
+                    throw schedulingFailure;
+                }
                 if (effectiveDelay >= 0) {
                     LOG.warn(
                             "Failed to update tokens, will try again in {}",
@@ -506,6 +513,9 @@ public class DefaultDelegationTokenManager implements DelegationTokenManager {
      */
     @VisibleForTesting
     long maybeScheduleRenewal(long delayMs) {
+        // A negative delay (the token already passed its validUntil) means run now. Clamp it so
+        // it cannot be mistaken for the -1 not-running sentinel.
+        delayMs = Math.max(0L, delayMs);
         synchronized (tokensUpdateFutureLock) {
             if (!running) {
                 return -1L;
