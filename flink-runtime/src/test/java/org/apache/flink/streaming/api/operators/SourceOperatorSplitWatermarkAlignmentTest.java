@@ -547,6 +547,56 @@ class SourceOperatorSplitWatermarkAlignmentTest {
                 0L, operator.getSplitMetricGroup(split0.splitId()).getAccumulatedPausedTime());
     }
 
+    @Test
+    void testPausedIdleSplitsCanBeResumedByAlignmentCheck() throws Exception {
+        final long idleTimeout = 100;
+        final MockSourceReader sourceReader =
+                new MockSourceReader(WaitingForSplits.DO_NOT_WAIT_FOR_SPLITS, true, true);
+        final TestProcessingTimeService processingTimeService = new TestProcessingTimeService();
+        final SourceOperator<Integer, MockSourceSplit> operator =
+                createAndOpenSourceOperatorWithIdleness(
+                        sourceReader, processingTimeService, idleTimeout);
+
+        final MockSourceSplit split0 = new MockSourceSplit(0, 0, 10);
+        final int allowedWatermark4 = 4;
+        final int allowedWatermark7 = 7;
+        split0.addRecord(4);
+        split0.addRecord(5);
+        split0.addRecord(6);
+        split0.addRecord(7);
+        split0.addRecord(8);
+        operator.handleOperatorEvent(
+                new AddSplitEvent<>(Arrays.asList(split0), new MockSourceSplitSerializer()));
+        final CollectingDataOutput<Integer> actualOutput = new CollectingDataOutput<>();
+
+        for (int i = 0; i < 3; i++) {
+            operator.emitNext(actualOutput);
+            processingTimeService.advance(idleTimeout - 1);
+        }
+        assertOutput(actualOutput, Arrays.asList(4, 5, 6));
+
+        // Alignment check fires and pauses the split
+        operator.handleOperatorEvent(new WatermarkAlignmentEvent(allowedWatermark4));
+        assertThat(operator.getSplitMetricGroup(split0.splitId()).isPaused()).isTrue();
+        assertThat(sourceReader.getPausedSplits()).containsExactly("0");
+        assertOutput(actualOutput, Arrays.asList(4, 5, 6));
+
+        // Normally idlenessTimer can't elapse while the split is paused
+        // So calling it manually to simulate a race condition
+        operator.updateCurrentSplitIdle(split0.splitId(), true);
+        assertThat(operator.getSplitMetricGroup(split0.splitId()).isIdle()).isTrue();
+
+        // Watermark advances and resumes the split (Though it is still considered idle)
+        operator.handleOperatorEvent(new WatermarkAlignmentEvent(allowedWatermark7));
+        assertThat(operator.getSplitMetricGroup(split0.splitId()).isIdle()).isTrue();
+        assertThat(sourceReader.getPausedSplits()).isEmpty();
+
+        // The split emits a record and breaks out of idleness
+        operator.emitNext(actualOutput); // 7
+        assertThat(operator.getSplitMetricGroup(split0.splitId()).isActive()).isTrue();
+        assertOutput(actualOutput, Arrays.asList(4, 5, 6, 7));
+    }
+
     private void assertOutput(
             CollectingDataOutput<Integer> actualOutput, List<Integer> expectedOutput) {
         assertThat(
