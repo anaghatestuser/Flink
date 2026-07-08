@@ -183,6 +183,7 @@ class FlinkRelMdRowCountTest extends FlinkRelMdHandlerTestBase {
     val windowAgg = new LogicalWindowAggregate(
       ts.getCluster,
       ts.getTraitSet,
+      java.util.List.of(),
       ts,
       ImmutableBitSet.of(0, 1),
       aggCallOfWindowAgg,
