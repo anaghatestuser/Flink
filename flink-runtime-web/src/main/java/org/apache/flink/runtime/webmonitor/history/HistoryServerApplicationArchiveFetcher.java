@@ -44,6 +44,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 
+import static org.apache.flink.configuration.HistoryServerOptions.HistoryServerArchiveLoadMode.EAGER;
+import static org.apache.flink.configuration.HistoryServerOptions.HistoryServerArchiveLoadMode.LAZY;
+import static org.apache.flink.runtime.webmonitor.history.HistoryServerArchiveFetcher.ArchiveEventType.OVERVIEW_PARSING;
+
 /**
  * This class is used by the {@link HistoryServer} to fetch the application and job archives that
  * are located at {@link HistoryServerOptions#HISTORY_SERVER_ARCHIVE_DIRS}. The directories are
@@ -73,21 +77,32 @@ public class HistoryServerApplicationArchiveFetcher<Entry>
     private final Map<Path, Map<String, Set<String>>> cachedApplicationIdsToJobIds =
             new HashMap<>();
 
+    private final Map<String, ArchiveMetaInfo> applicationArchiveMetaInfoCache;
+
     HistoryServerApplicationArchiveFetcher(
             List<HistoryServer.RefreshLocation> refreshDirs,
             File webDir,
-            Consumer<HistoryServerApplicationArchiveFetcher.ArchiveEvent> archiveEventListener,
+            Consumer<ArchiveEvent> archiveEventListener,
             boolean cleanupExpiredArchives,
             ArchiveRetainedStrategy retainedStrategy,
-            ArchiveStorage<Entry> archiveStorage) {
+            ArchiveStorage<Entry> archiveStorage,
+            Map<String, ArchiveMetaInfo> archiveMetaInfoCache,
+            Map<String, ArchiveMetaInfo> applicationArchiveMetaInfoCache,
+            int lazyFetchExecutorCommonPoolSize,
+            int lazyFetchExecutorIndividualPoolSize)
+            throws IOException {
         super(
                 refreshDirs,
                 webDir,
                 archiveEventListener,
                 cleanupExpiredArchives,
                 retainedStrategy,
-                archiveStorage);
+                archiveStorage,
+                archiveMetaInfoCache,
+                lazyFetchExecutorCommonPoolSize,
+                lazyFetchExecutorIndividualPoolSize);
 
+        this.applicationArchiveMetaInfoCache = applicationArchiveMetaInfoCache;
         for (HistoryServer.RefreshLocation refreshDir : refreshDirs) {
             cachedApplicationIdsToJobIds.put(refreshDir.getPath(), new HashMap<>());
         }
@@ -143,7 +158,16 @@ public class HistoryServerApplicationArchiveFetcher<Entry>
 
     @Override
     List<ArchiveEvent> processArchive(String archiveId, Path archivePath, Path refreshDir)
-            throws IOException {
+            throws Exception {
+        return processArchive(archiveId, archivePath, refreshDir, EAGER);
+    }
+
+    List<ArchiveEvent> processArchive(
+            String archiveId,
+            Path archivePath,
+            Path refreshDir,
+            HistoryServerOptions.HistoryServerArchiveLoadMode archiveLoadMode)
+            throws Exception {
         FileSystem fs = archivePath.getFileSystem();
         Path applicationArchive = new Path(archivePath, ArchivePathUtils.APPLICATION_ARCHIVE_NAME);
         if (!fs.exists(applicationArchive)) {
@@ -162,7 +186,11 @@ public class HistoryServerApplicationArchiveFetcher<Entry>
                     .get(refreshDir)
                     .computeIfAbsent(archiveId, k -> new HashSet<>())
                     .add(jobId);
-            events.add(processJobArchive(jobId, jobArchive.getPath()));
+            ArchiveEvent processArchiveEvents =
+                    LAZY.equals(archiveLoadMode)
+                            ? lazyProcessJobArchive(jobId, jobArchive.getPath(), false)
+                            : processJobArchive(jobId, jobArchive.getPath());
+            events.add(processArchiveEvents);
         }
 
         return events;
@@ -234,6 +262,7 @@ public class HistoryServerApplicationArchiveFetcher<Entry>
             LOG.warn("Could not delete file from application directory.", ioe);
         }
 
+        applicationArchiveMetaInfoCache.remove(applicationId);
         return new ArchiveEvent(applicationId, ArchiveEventType.DELETED);
     }
 
@@ -280,6 +309,39 @@ public class HistoryServerApplicationArchiveFetcher<Entry>
                     overviewWithApplications);
         } catch (Exception e) {
             LOG.error("Failed to update application overview.", e);
+        }
+    }
+
+    @Override
+    List<ArchiveEvent> lazyProcessArchive(String archiveId, Path archivePath, Path refreshDir)
+            throws Exception {
+        List<ArchiveEvent> events = new ArrayList<>();
+        if (!applicationArchiveMetaInfoCache.containsKey(archiveId)) {
+            applicationArchiveMetaInfoCache.put(
+                    archiveId, new ArchiveMetaInfo(archiveId, OVERVIEW_PARSING, archivePath));
+        } else {
+            events.add(
+                    new ArchiveEvent(
+                            archiveId,
+                            applicationArchiveMetaInfoCache.get(archiveId).getEventType()));
+            return events;
+        }
+
+        events.addAll(processArchive(archiveId, archivePath, refreshDir, LAZY));
+
+        applicationArchiveMetaInfoCache.get(archiveId).setEventType(ArchiveEventType.CREATED);
+        return events;
+    }
+
+    @Override
+    void cleanUpLazyFetchTask(String archiveId) {
+        for (HistoryServer.RefreshLocation refreshDir : refreshDirs) {
+            Path refreshDirPath = refreshDir.getPath();
+            if (cachedApplicationIdsToJobIds.get(refreshDirPath).containsKey(archiveId)) {
+                Set<String> jobIds =
+                        cachedApplicationIdsToJobIds.get(refreshDirPath).get(archiveId);
+                jobIds.forEach(super::cleanUpLazyFetchTask);
+            }
         }
     }
 }
