@@ -512,7 +512,17 @@ class NativeS3FileSystem extends FileSystem
 
     @Override
     public boolean canCopyPaths(Path source, Path destination) {
-        return bulkCopyHelper != null;
+        return bulkCopyHelper != null && isS3Path(source) && isLocalPath(destination);
+    }
+
+    private static boolean isS3Path(Path path) {
+        final String scheme = path.toUri().getScheme();
+        return "s3".equalsIgnoreCase(scheme) || "s3a".equalsIgnoreCase(scheme);
+    }
+
+    private static boolean isLocalPath(Path path) {
+        final String scheme = path.toUri().getScheme();
+        return scheme == null || "file".equalsIgnoreCase(scheme);
     }
 
     @Override
@@ -566,12 +576,12 @@ class NativeS3FileSystem extends FileSystem
                                                                         "S3 client provider closed");
                                                             }
                                                         }))
-                        .orTimeout(fsCloseTimeout.toSeconds(), TimeUnit.SECONDS)
+                        .orTimeout(fsCloseTimeout.toMillis(), TimeUnit.MILLISECONDS)
                         .whenComplete(
                                 (result, error) -> {
                                     if (error != null) {
                                         LOG.error(
-                                                "FileSystem close timed out after {} for bucket: {}",
+                                                "FileSystem close did not complete cleanly within {} for bucket: {}",
                                                 fsCloseTimeout,
                                                 bucketName,
                                                 error);
