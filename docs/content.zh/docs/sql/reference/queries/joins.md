@@ -104,6 +104,31 @@ AND o.order_time BETWEEN s.ship_time - INTERVAL '4' HOUR AND s.ship_time
 对于流式查询，对比 regular join，interval join 只支持有时间属性的非更新表。
 由于时间属性是递增的，Flink 从状态中移除旧值也不会影响结果的正确性。
 
+### Outer Interval Join 的提前触发（Early Fire）
+
+默认情况下，outer interval join 会等到未匹配行的时间窗口完全关闭后，才将该行以 null 补齐的形式输出。`EARLY_FIRE` 提示可以缩短这个等待：未匹配的 outer 行会在可配置的 `delay` 之后被推测性地以 null 补齐输出，如果之后在窗口内出现真正的匹配，则会进行更正。这会将仅追加（append-only）的结果变为更新（updating）结果，因此下游 sink 必须能够接受更新。
+
+```sql
+SELECT /*+ EARLY_FIRE('delay'='5s') */ o.id, s.ship_time
+FROM Orders o
+LEFT OUTER JOIN Shipments s
+ON o.id = s.order_id
+AND o.order_time BETWEEN s.ship_time - INTERVAL '10' SECOND AND s.ship_time + INTERVAL '1' HOUR
+```
+
+当某个订单还没有对应的发货记录时，在 `delay` 时间过去后，join 会输出一次 `+I[id, NULL]`。如果之后在窗口内到达了一条匹配的发货记录，则该推测行会先被 `-U[id, NULL]` 撤回，再以 `+U[id, ship_time]` 更正。每个 outer 行至多触发一次；该提示不会周期性地输出。
+
+该提示支持以下选项：
+
+| 选项 | 是否必填 | 描述 |
+| --- | --- | --- |
+| `delay` | 是 | 一个正的时间长度（例如 `'5s'`），从行的时间属性开始计算。窗口内没有匹配时，在该延迟过去后输出推测性的 null 补齐行。 |
+| `time_mode` | 否 | 取值为 `rowtime` 或 `proctime`，用于控制延迟是相对水位线（`rowtime`）还是相对墙上时钟（`proctime`）来计算。事件时间 join 默认为 `rowtime`，处理时间 join 默认为 `proctime`。在事件时间 join 上设置 `'time_mode'='proctime'` 会改为按墙上时钟触发提前触发。在处理时间 join 上设置 `'time_mode'='rowtime'` 会报错。 |
+
+该提示仅对 outer join（`LEFT`、`RIGHT`、`FULL`）生效。在 inner join 以及窗口跨度为负的 join 上会被忽略，这些情况仍保持仅追加。
+
+**注意：** `EARLY_FIRE` 与 `table.exec.emit.early-fire.*` 配置无关，后者用于控制窗口聚合的提前触发，而非 interval join。
+
 Temporal Joins
 --------------
 

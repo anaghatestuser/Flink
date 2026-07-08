@@ -152,6 +152,61 @@ public class IntervalJoinTestPrograms {
                                     + " WHERE o.proc_time BETWEEN s.proc_time - INTERVAL '5' SECOND AND s.proc_time + INTERVAL '5' SECOND;")
                     .build();
 
+    static final Row[] EARLY_FIRE_ORDER_BEFORE_DATA = {
+        Row.of(1, "2020-04-15 08:00:01"), Row.of(9, "2020-04-15 08:00:06"),
+    };
+
+    static final Row[] EARLY_FIRE_SHIPMENT_BEFORE_DATA = {
+        Row.of(100, 9, "2020-04-15 08:00:06"),
+    };
+
+    static final Row[] EARLY_FIRE_ORDER_AFTER_DATA = {
+        Row.of(20, "2020-04-15 08:00:20"),
+    };
+
+    static final Row[] EARLY_FIRE_SHIPMENT_AFTER_DATA = {
+        Row.of(101, 1, "2020-04-15 08:00:03"), Row.of(102, 20, "2020-04-15 08:00:20"),
+    };
+
+    static final TableTestProgram INTERVAL_JOIN_EARLY_FIRE =
+            TableTestProgram.of(
+                            "interval-join-early-fire",
+                            "validates the EARLY_FIRE hint on an outer interval join: an unmatched"
+                                    + " left row is speculatively padded before the savepoint and"
+                                    + " retracted when its match arrives after restore")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("orders_t")
+                                    .addSchema(ORDERS_EVENT_TIME_SCHEMA)
+                                    .producedBeforeRestore(EARLY_FIRE_ORDER_BEFORE_DATA)
+                                    .producedAfterRestore(EARLY_FIRE_ORDER_AFTER_DATA)
+                                    .build())
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("shipments_t")
+                                    .addSchema(SHIPMENTS_EVENT_TIME_SCHEMA)
+                                    .producedBeforeRestore(EARLY_FIRE_SHIPMENT_BEFORE_DATA)
+                                    .producedAfterRestore(EARLY_FIRE_SHIPMENT_AFTER_DATA)
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema(SINK_SCHEMA)
+                                    .consumedBeforeRestore(
+                                            "+I[1, 2020-04-15 08:00:01, null]",
+                                            "+I[9, 2020-04-15 08:00:06, 2020-04-15 08:00:06]")
+                                    .consumedAfterRestore(
+                                            "-U[1, 2020-04-15 08:00:01, null]",
+                                            "+U[1, 2020-04-15 08:00:01, 2020-04-15 08:00:03]",
+                                            "+I[20, 2020-04-15 08:00:20, 2020-04-15 08:00:20]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink_t SELECT /*+ EARLY_FIRE('delay'='2s') */\n"
+                                    + "     o.id AS order_id,\n"
+                                    + "     o.order_ts_str,\n"
+                                    + "     s.shipment_ts_str\n"
+                                    + " FROM orders_t o LEFT OUTER JOIN shipments_t s\n"
+                                    + " ON o.id = s.order_id\n"
+                                    + " AND o.order_ts BETWEEN s.shipment_ts - INTERVAL '5' SECOND AND s.shipment_ts + INTERVAL '5' SECOND;")
+                    .build();
+
     static final TableTestProgram INTERVAL_JOIN_NEGATIVE_INTERVAL =
             TableTestProgram.of(
                             "interval-join-negative-interval",
