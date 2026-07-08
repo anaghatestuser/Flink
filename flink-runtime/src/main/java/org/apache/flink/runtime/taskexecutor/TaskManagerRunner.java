@@ -640,6 +640,11 @@ public class TaskManagerRunner implements FatalErrorHandler {
                         resourceID,
                         taskManagerServicesConfiguration.getSystemResourceMetricsProbingInterval());
 
+        // Second-phase init for file system plugins that opt into metrics (e.g.
+        // flink-s3-fs-native): hand them the process-level metric group now that the
+        // MetricRegistry exists. See FileSystem#attachMetrics and MetricsAware.
+        FileSystem.attachMetrics(taskManagerMetricGroup.f0);
+
         final ExecutorService ioExecutor =
                 Executors.newFixedThreadPool(
                         taskManagerServicesConfiguration.getNumIoThreads(),
