@@ -154,7 +154,7 @@ under the License.
 		<dependency>
 			<groupId>org.apache.calcite</groupId>
 			<artifactId>calcite-core</artifactId>
-			<version>1.16.0</version>
+			<version>1.42.0-lineaje-01</version>
 			<optional>${flink.markBundledAsOptional}</optional>
 		</dependency>
 	
