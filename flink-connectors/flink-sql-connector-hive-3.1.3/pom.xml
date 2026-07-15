@@ -124,7 +124,7 @@ under the License.
 		<dependency>
 			<groupId>org.apache.thrift</groupId>
 			<artifactId>libfb303</artifactId>
-			<version>0.9.3</version>
+			<version>0.23.0</version>
 			<optional>${flink.markBundledAsOptional}</optional>
 		</dependency>
 
@@ -132,7 +132,7 @@ under the License.
 		<dependency>
 			<groupId>org.apache.avro</groupId>
 			<artifactId>avro</artifactId>
-			<version>1.8.2</version>
+			<version>1.12.1</version>
 			<optional>${flink.markBundledAsOptional}</optional>
 		</dependency>
 
@@ -140,7 +140,7 @@ under the License.
 			<groupId>org.apache.avro</groupId>
 			<artifactId>avro-mapred</artifactId>
 			<classifier>hadoop2</classifier>
-			<version>1.8.2</version>
+			<version>1.12.1</version>
 			<optional>${flink.markBundledAsOptional}</optional>
 			<exclusions>
 				<exclusion>
