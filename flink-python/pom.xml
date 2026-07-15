@@ -136,6 +136,7 @@ under the License.
 		<dependency>
 			<groupId>com.google.protobuf</groupId>
 			<artifactId>protobuf-java</artifactId>
+			<version>3.25.9</version>
 			<optional>${flink.markBundledAsOptional}</optional>
 		</dependency>
 

@@ -79,7 +79,18 @@ under the License.
 			<type>test-jar</type>
 			<scope>test</scope>
 		</dependency>
-	</dependencies>
+	
+
+		<dependency>
+
+		  <groupId>com.google.protobuf</groupId>
+
+		  <artifactId>protobuf-java</artifactId>
+
+		  <version>3.25.9</version>
+
+		</dependency>
+</dependencies>
 
 	<!-- Because flink-tests needs the CompilerTestBsae -->
 	<build>

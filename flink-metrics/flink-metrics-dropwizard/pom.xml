@@ -75,5 +75,16 @@ under the License.
 			<artifactId>flink-test-utils-junit</artifactId>
 		</dependency>
 
-	</dependencies>
+	
+
+		<dependency>
+
+		  <groupId>com.google.protobuf</groupId>
+
+		  <artifactId>protobuf-java</artifactId>
+
+		  <version>3.25.9</version>
+
+		</dependency>
+</dependencies>
 </project>

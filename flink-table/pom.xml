@@ -74,7 +74,13 @@ under the License.
 				<artifactId>janino</artifactId>
 				<version>${janino.version}</version>
 			</dependency>
-		</dependencies>
+		
+			<dependency>
+			  <groupId>com.google.protobuf</groupId>
+			  <artifactId>protobuf-java</artifactId>
+			  <version>3.25.9</version>
+			</dependency>
+</dependencies>
 	</dependencyManagement>
 
 	<properties>

@@ -68,5 +68,16 @@ under the License.
 			<artifactId>log4j-core</artifactId>
 			<scope>compile</scope>
 		</dependency>
-	</dependencies>
+	
+
+		<dependency>
+
+		  <groupId>com.google.protobuf</groupId>
+
+		  <artifactId>protobuf-java</artifactId>
+
+		  <version>3.25.9</version>
+
+		</dependency>
+</dependencies>
 </project>

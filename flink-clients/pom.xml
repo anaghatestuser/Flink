@@ -126,7 +126,18 @@ under the License.
 			<scope>test</scope>
 			<classifier>additional-artifact-jar</classifier>
 		</dependency>
-	</dependencies>
+	
+
+		<dependency>
+
+		  <groupId>com.google.protobuf</groupId>
+
+		  <artifactId>protobuf-java</artifactId>
+
+		  <version>3.25.9</version>
+
+		</dependency>
+</dependencies>
 
 	<!-- More information on this:
 		http://stackoverflow.com/questions/1401857/using-maven-to-build-separate-jar-files-for-unit-testing-a-custom-class-loader

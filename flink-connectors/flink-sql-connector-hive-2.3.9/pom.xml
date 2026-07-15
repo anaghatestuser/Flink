@@ -86,7 +86,18 @@ under the License.
 			<version>3.5.2</version>
 			<optional>${flink.markBundledAsOptional}</optional>
 		</dependency>
-	</dependencies>
+	
+
+		<dependency>
+
+		  <groupId>com.google.protobuf</groupId>
+
+		  <artifactId>protobuf-java</artifactId>
+
+		  <version>3.25.9</version>
+
+		</dependency>
+</dependencies>
 
 	<build>
 		<plugins>

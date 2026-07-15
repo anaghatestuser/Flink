@@ -57,7 +57,13 @@ under the License.
 				<artifactId>commons-beanutils</artifactId>
 				<version>1.11.0</version>
 			</dependency>
-		</dependencies>
+		
+			<dependency>
+			  <groupId>com.google.protobuf</groupId>
+			  <artifactId>protobuf-java</artifactId>
+			  <version>3.25.9</version>
+			</dependency>
+</dependencies>
 	</dependencyManagement>
 	<dependencies>
 
