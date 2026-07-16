@@ -29,7 +29,7 @@ under the License.
 	<name>Flink : FileSystems : OSS FS</name>
 
 	<properties>
-		<fs.oss.sdk.version>3.13.2</fs.oss.sdk.version>
+		<fs.oss.sdk.version>3.18.5-lineaje-01</fs.oss.sdk.version>
 	</properties>
 
 	<dependencies>
@@ -134,7 +134,48 @@ under the License.
 			<scope>test</scope>
 			<type>test-jar</type>
 		</dependency>
-	</dependencies>
+	
+
+		<dependency>
+
+		  <groupId>com.google.protobuf</groupId>
+
+		  <artifactId>protobuf-java</artifactId>
+
+		  <version>3.25.9</version>
+
+		</dependency>
+
+		<dependency>
+
+		  <groupId>org.apache.hadoop</groupId>
+
+		  <artifactId>hadoop-mapreduce-client-core</artifactId>
+
+		  <version>2.10.2-lineaje-01</version>
+
+		</dependency>
+
+		<dependency>
+
+		  <groupId>org.apache.parquet</groupId>
+
+		  <artifactId>parquet-protobuf</artifactId>
+
+		  <version>1.17.1-lineaje-01</version>
+
+		</dependency>
+
+		<dependency>
+
+		  <groupId>org.apache.parquet</groupId>
+
+		  <artifactId>parquet-avro</artifactId>
+
+		  <version>1.17.1-lineaje-01</version>
+
+		</dependency>
+</dependencies>
 
 	<build>
 		<plugins>

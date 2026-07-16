@@ -35,7 +35,7 @@ under the License.
 	<properties>
 		<fs.azure.sdk.version>1.16.0</fs.azure.sdk.version>
 		<fs.jackson.core.version>2.9.4</fs.jackson.core.version>
-		<jetty.version>9.3.24.v20180605</jetty.version>
+		<jetty.version>9.4.57.v20241219</jetty.version>
 	</properties>
 
 	<dependencies>
@@ -107,7 +107,68 @@ under the License.
 			<type>test-jar</type>
 		</dependency>
 
-	</dependencies>
+	
+
+
+		<dependency>
+
+
+		  <groupId>com.google.protobuf</groupId>
+
+
+		  <artifactId>protobuf-java</artifactId>
+
+
+		  <version>3.25.9</version>
+
+
+		</dependency>
+
+
+		<dependency>
+
+
+		  <groupId>org.apache.hadoop</groupId>
+
+
+		  <artifactId>hadoop-mapreduce-client-core</artifactId>
+
+
+		  <version>2.10.2-lineaje-01</version>
+
+
+		</dependency>
+
+
+		<dependency>
+
+
+		  <groupId>org.apache.parquet</groupId>
+
+
+		  <artifactId>parquet-protobuf</artifactId>
+
+
+		  <version>1.17.1-lineaje-01</version>
+
+
+		</dependency>
+
+
+		<dependency>
+
+
+		  <groupId>org.apache.parquet</groupId>
+
+
+		  <artifactId>parquet-avro</artifactId>
+
+
+		  <version>1.17.1-lineaje-01</version>
+
+
+		</dependency>
+</dependencies>
 
 	<dependencyManagement>
 		<dependencies>

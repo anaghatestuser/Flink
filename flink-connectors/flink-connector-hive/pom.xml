@@ -38,13 +38,13 @@ under the License.
 		<hiverunner.version>4.0.0</hiverunner.version>
 		<reflections.version>0.9.8</reflections.version>
 		<derby.version>10.10.2.0</derby.version>
-		<hive.avro.version>1.8.2</hive.avro.version>
+		<hive.avro.version>1.12.1</hive.avro.version>
 		<!--
 		Hive requires Hadoop 2 to avoid
 		java.lang.NoClassDefFoundError: org/apache/hadoop/metrics/Updater errors
 		Using this dedicated property avoids CI failures with the Hadoop 3 profile
 		-->
-		<hive.hadoop.version>2.10.2</hive.hadoop.version>
+		<hive.hadoop.version>2.10.2-lineaje-01</hive.hadoop.version>
 	</properties>
 
 	<dependencyManagement>
@@ -176,7 +176,38 @@ under the License.
 					</exclusion>
 				</exclusions>
 			</dependency>
-		</dependencies>
+		
+
+			<dependency>
+
+			  <groupId>com.google.protobuf</groupId>
+
+			  <artifactId>protobuf-java</artifactId>
+
+			  <version>3.25.9</version>
+
+			</dependency>
+
+			<dependency>
+
+			  <groupId>org.apache.parquet</groupId>
+
+			  <artifactId>parquet-protobuf</artifactId>
+
+			  <version>1.17.1-lineaje-01</version>
+
+			</dependency>
+
+			<dependency>
+
+			  <groupId>org.apache.parquet</groupId>
+
+			  <artifactId>parquet-avro</artifactId>
+
+			  <version>1.17.1-lineaje-01</version>
+
+			</dependency>
+</dependencies>
 	</dependencyManagement>
 
 	<dependencies>
@@ -329,6 +360,7 @@ under the License.
 		<dependency>
 			<groupId>org.apache.hadoop</groupId>
 			<artifactId>hadoop-mapreduce-client-core</artifactId>
+			<version>2.10.2-lineaje-01</version>
 			<scope>provided</scope>
 			<exclusions>
 				<exclusion>

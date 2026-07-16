@@ -31,7 +31,7 @@ under the License.
 	<packaging>jar</packaging>
 
 	<properties>
-		<fs.s3.aws.version>1.12.319</fs.s3.aws.version>
+		<fs.s3.aws.version>1.12.797-lineaje-01</fs.s3.aws.version>
 		<japicmp.skip>true</japicmp.skip>
 	</properties>
 
@@ -276,7 +276,28 @@ under the License.
 			<version>${project.version}</version>
 			<scope>test</scope>
 		</dependency>
-	</dependencies>
+	
+		<dependency>
+		  <groupId>com.google.protobuf</groupId>
+		  <artifactId>protobuf-java</artifactId>
+		  <version>3.25.9</version>
+		</dependency>
+		<dependency>
+		  <groupId>org.apache.hadoop</groupId>
+		  <artifactId>hadoop-mapreduce-client-core</artifactId>
+		  <version>2.10.2-lineaje-01</version>
+		</dependency>
+		<dependency>
+		  <groupId>org.apache.parquet</groupId>
+		  <artifactId>parquet-protobuf</artifactId>
+		  <version>1.17.1-lineaje-01</version>
+		</dependency>
+		<dependency>
+		  <groupId>org.apache.parquet</groupId>
+		  <artifactId>parquet-avro</artifactId>
+		  <version>1.17.1-lineaje-01</version>
+		</dependency>
+</dependencies>
 
 	<build>
 		<plugins>

@@ -31,7 +31,7 @@ under the License.
 	<packaging>jar</packaging>
 
 	<properties>
-		<kubernetes.client.version>6.9.2</kubernetes.client.version>
+		<kubernetes.client.version>6.14.0-lineaje-01</kubernetes.client.version>
 		<surefire.module.config><!--
 			CommonTestUtils#setEnv
 			-->--add-opens=java.base/java.util=ALL-UNNAMED
@@ -92,7 +92,48 @@ under the License.
 			<scope>test</scope>
 		</dependency>
 
-	</dependencies>
+	
+
+		<dependency>
+
+		  <groupId>com.google.protobuf</groupId>
+
+		  <artifactId>protobuf-java</artifactId>
+
+		  <version>3.25.9</version>
+
+		</dependency>
+
+		<dependency>
+
+		  <groupId>org.apache.hadoop</groupId>
+
+		  <artifactId>hadoop-mapreduce-client-core</artifactId>
+
+		  <version>2.10.2-lineaje-01</version>
+
+		</dependency>
+
+		<dependency>
+
+		  <groupId>org.apache.parquet</groupId>
+
+		  <artifactId>parquet-protobuf</artifactId>
+
+		  <version>1.17.1-lineaje-01</version>
+
+		</dependency>
+
+		<dependency>
+
+		  <groupId>org.apache.parquet</groupId>
+
+		  <artifactId>parquet-avro</artifactId>
+
+		  <version>1.17.1-lineaje-01</version>
+
+		</dependency>
+</dependencies>
 
 	<build>
 		<plugins>
