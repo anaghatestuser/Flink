@@ -94,6 +94,11 @@ under the License.
 		  <artifactId>hadoop-mapreduce-client-core</artifactId>
 		  <version>2.10.2-lineaje-01</version>
 		</dependency>
+		<dependency>
+		  <groupId>org.apache.parquet</groupId>
+		  <artifactId>parquet-protobuf</artifactId>
+		  <version>1.17.1-lineaje-01</version>
+		</dependency>
 </dependencies>
 
 	<build>
